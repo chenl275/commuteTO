@@ -70,7 +70,7 @@ export default function CommuteForm() {
       onSubmit={handleSubmit}
       className="rounded-3xl border border-white/15 bg-white/10 p-5 shadow-2xl shadow-black/40 backdrop-blur-xl sm:p-8"
     >
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
+      <div className="flex flex-col gap-4">
         <FormField
           id="from"
           label="From"
@@ -84,9 +84,9 @@ export default function CommuteForm() {
           type="button"
           onClick={handleSwap}
           aria-label="Swap from and destination"
-          className="mx-auto flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/20 text-white/70 transition-colors hover:bg-white/10 hover:text-white sm:mb-0.5"
+          className="mx-auto -my-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/20 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
         >
-          <SwapIcon className="h-4 w-4 rotate-90 sm:rotate-0" />
+          <SwapIcon className="h-4 w-4 rotate-90" />
         </button>
 
         <FormField
@@ -106,7 +106,7 @@ export default function CommuteForm() {
       />
 
       {isLeavingLater && (
-        <div className="mt-4 flex animate-fade-in-up flex-col gap-4 sm:flex-row">
+        <div className="mt-4 flex animate-fade-in-up flex-col gap-4">
           <FormField
             id="departure-date"
             label="Date"
