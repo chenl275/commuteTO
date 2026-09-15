@@ -1,28 +1,11 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
 import { MoonIcon, SunIcon } from "@/components/icons";
 import { THEME_STORAGE_KEY } from "./constants";
-
-function subscribe(onChange: () => void) {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["class"],
-  });
-  return () => observer.disconnect();
-}
-
-function getSnapshot() {
-  return document.documentElement.classList.contains("dark");
-}
-
-function getServerSnapshot() {
-  return false;
-}
+import { useIsDarkMode } from "./useIsDarkMode";
 
 export default function ThemeToggle() {
-  const isDark = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const isDark = useIsDarkMode();
 
   function toggleTheme() {
     const next = !isDark;

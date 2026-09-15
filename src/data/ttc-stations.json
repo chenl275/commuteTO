@@ -1,0 +1,1318 @@
+[
+  {
+    "id": "vaughan-metropolitan-centre",
+    "name": "Vaughan Metropolitan Centre",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.52791,
+      43.79402
+    ]
+  },
+  {
+    "id": "highway-407",
+    "name": "Highway 407",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.52345,
+      43.78336
+    ]
+  },
+  {
+    "id": "pioneer-village",
+    "name": "Pioneer Village",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.51032,
+      43.77718
+    ]
+  },
+  {
+    "id": "york-university",
+    "name": "York University",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.50015,
+      43.77385
+    ]
+  },
+  {
+    "id": "finch-west",
+    "name": "Finch West",
+    "lines": [
+      1,
+      6
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.49166,
+      43.76395
+    ]
+  },
+  {
+    "id": "downsview-park",
+    "name": "Downsview Park",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.47955,
+      43.75394
+    ]
+  },
+  {
+    "id": "sheppard-west",
+    "name": "Sheppard West",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.46265,
+      43.74993
+    ]
+  },
+  {
+    "id": "wilson",
+    "name": "Wilson",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.45124,
+      43.73411
+    ]
+  },
+  {
+    "id": "yorkdale",
+    "name": "Yorkdale",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.44774,
+      43.72509
+    ]
+  },
+  {
+    "id": "lawrence-west",
+    "name": "Lawrence West",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.44411,
+      43.71578
+    ]
+  },
+  {
+    "id": "glencairn",
+    "name": "Glencairn",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.44109,
+      43.70934
+    ]
+  },
+  {
+    "id": "cedarvale",
+    "name": "Cedarvale",
+    "lines": [
+      1,
+      5
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.43591,
+      43.69901
+    ]
+  },
+  {
+    "id": "st-clair-west",
+    "name": "St. Clair West",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.41509,
+      43.68405
+    ]
+  },
+  {
+    "id": "dupont",
+    "name": "Dupont",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.4068,
+      43.67478
+    ]
+  },
+  {
+    "id": "spadina",
+    "name": "Spadina",
+    "lines": [
+      1,
+      2
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.40459,
+      43.66712
+    ]
+  },
+  {
+    "id": "st-george",
+    "name": "St. George",
+    "lines": [
+      1,
+      2
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.39981,
+      43.66827
+    ]
+  },
+  {
+    "id": "museum",
+    "name": "Museum",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39281,
+      43.66674
+    ]
+  },
+  {
+    "id": "queens-park",
+    "name": "Queen's Park",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39007,
+      43.6598
+    ]
+  },
+  {
+    "id": "st-patrick",
+    "name": "St. Patrick",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38802,
+      43.65481
+    ]
+  },
+  {
+    "id": "osgoode",
+    "name": "Osgoode",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38681,
+      43.6507
+    ]
+  },
+  {
+    "id": "st-andrew",
+    "name": "St. Andrew",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38515,
+      43.64745
+    ]
+  },
+  {
+    "id": "union",
+    "name": "Union",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.37923,
+      43.64575
+    ]
+  },
+  {
+    "id": "king",
+    "name": "King",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.37752,
+      43.64911
+    ]
+  },
+  {
+    "id": "queen",
+    "name": "Queen",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.37812,
+      43.65246
+    ]
+  },
+  {
+    "id": "tmu",
+    "name": "TMU",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38038,
+      43.6563
+    ]
+  },
+  {
+    "id": "college",
+    "name": "College",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38268,
+      43.6612
+    ]
+  },
+  {
+    "id": "wellesley",
+    "name": "Wellesley",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38394,
+      43.66529
+    ]
+  },
+  {
+    "id": "bloor-yonge",
+    "name": "Bloor-Yonge",
+    "lines": [
+      1,
+      2
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.38554,
+      43.67028
+    ]
+  },
+  {
+    "id": "rosedale",
+    "name": "Rosedale",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38875,
+      43.67694
+    ]
+  },
+  {
+    "id": "summerhill",
+    "name": "Summerhill",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39079,
+      43.68229
+    ]
+  },
+  {
+    "id": "st-clair",
+    "name": "St. Clair",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39298,
+      43.68811
+    ]
+  },
+  {
+    "id": "davisville",
+    "name": "Davisville",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39712,
+      43.69785
+    ]
+  },
+  {
+    "id": "eglinton",
+    "name": "Eglinton",
+    "lines": [
+      1,
+      5
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.39877,
+      43.70607
+    ]
+  },
+  {
+    "id": "lawrence",
+    "name": "Lawrence",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.40193,
+      43.72535
+    ]
+  },
+  {
+    "id": "york-mills",
+    "name": "York Mills",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.40636,
+      43.7449
+    ]
+  },
+  {
+    "id": "sheppard-yonge",
+    "name": "Sheppard-Yonge",
+    "lines": [
+      1,
+      4
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.41236,
+      43.7617
+    ]
+  },
+  {
+    "id": "north-york-centre",
+    "name": "North York Centre",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.41309,
+      43.76901
+    ]
+  },
+  {
+    "id": "finch",
+    "name": "Finch",
+    "lines": [
+      1
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.41638,
+      43.78175
+    ]
+  },
+  {
+    "id": "kipling",
+    "name": "Kipling",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.53437,
+      43.63863
+    ]
+  },
+  {
+    "id": "islington",
+    "name": "Islington",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.52407,
+      43.64541
+    ]
+  },
+  {
+    "id": "royal-york",
+    "name": "Royal York",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.51134,
+      43.64816
+    ]
+  },
+  {
+    "id": "old-mill",
+    "name": "Old Mill",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.49492,
+      43.65006
+    ]
+  },
+  {
+    "id": "jane",
+    "name": "Jane",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.48438,
+      43.64988
+    ]
+  },
+  {
+    "id": "runnymede",
+    "name": "Runnymede",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.47597,
+      43.65174
+    ]
+  },
+  {
+    "id": "high-park",
+    "name": "High Park",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.4669,
+      43.65392
+    ]
+  },
+  {
+    "id": "keele",
+    "name": "Keele",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.46006,
+      43.65559
+    ]
+  },
+  {
+    "id": "dundas-west",
+    "name": "Dundas West",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.45324,
+      43.65693
+    ]
+  },
+  {
+    "id": "lansdowne",
+    "name": "Lansdowne",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.44269,
+      43.65911
+    ]
+  },
+  {
+    "id": "dufferin",
+    "name": "Dufferin",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.43558,
+      43.66008
+    ]
+  },
+  {
+    "id": "ossington",
+    "name": "Ossington",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.4263,
+      43.66238
+    ]
+  },
+  {
+    "id": "christie",
+    "name": "Christie",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.41837,
+      43.66412
+    ]
+  },
+  {
+    "id": "bathurst",
+    "name": "Bathurst",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.41129,
+      43.66618
+    ]
+  },
+  {
+    "id": "bay",
+    "name": "Bay",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39011,
+      43.67028
+    ]
+  },
+  {
+    "id": "sherbourne",
+    "name": "Sherbourne",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.37645,
+      43.67204
+    ]
+  },
+  {
+    "id": "castle-frank",
+    "name": "Castle Frank",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.36945,
+      43.67323
+    ]
+  },
+  {
+    "id": "broadview",
+    "name": "Broadview",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.35847,
+      43.67693
+    ]
+  },
+  {
+    "id": "chester",
+    "name": "Chester",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.35253,
+      43.67823
+    ]
+  },
+  {
+    "id": "pape",
+    "name": "Pape",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.34501,
+      43.67989
+    ]
+  },
+  {
+    "id": "donlands",
+    "name": "Donlands",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.33782,
+      43.68098
+    ]
+  },
+  {
+    "id": "greenwood",
+    "name": "Greenwood",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.33029,
+      43.68257
+    ]
+  },
+  {
+    "id": "coxwell",
+    "name": "Coxwell",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.32306,
+      43.68412
+    ]
+  },
+  {
+    "id": "woodbine",
+    "name": "Woodbine",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.31277,
+      43.68641
+    ]
+  },
+  {
+    "id": "main-street",
+    "name": "Main Street",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.3015,
+      43.68908
+    ]
+  },
+  {
+    "id": "victoria-park",
+    "name": "Victoria Park",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.28916,
+      43.69454
+    ]
+  },
+  {
+    "id": "warden",
+    "name": "Warden",
+    "lines": [
+      2
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.27947,
+      43.7116
+    ]
+  },
+  {
+    "id": "kennedy",
+    "name": "Kennedy",
+    "lines": [
+      2,
+      5
+    ],
+    "isTransfer": true,
+    "coordinates": [
+      -79.26399,
+      43.73249
+    ]
+  },
+  {
+    "id": "bayview",
+    "name": "Bayview",
+    "lines": [
+      4
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.38753,
+      43.7671
+    ]
+  },
+  {
+    "id": "bessarion",
+    "name": "Bessarion",
+    "lines": [
+      4
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.37591,
+      43.76907
+    ]
+  },
+  {
+    "id": "leslie",
+    "name": "Leslie",
+    "lines": [
+      4
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.36696,
+      43.77104
+    ]
+  },
+  {
+    "id": "don-mills",
+    "name": "Don Mills",
+    "lines": [
+      4
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.34661,
+      43.77541
+    ]
+  },
+  {
+    "id": "mount-dennis",
+    "name": "Mount Dennis",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.4881,
+      43.68864
+    ]
+  },
+  {
+    "id": "keelesdale",
+    "name": "Keelesdale",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.47468,
+      43.69051
+    ]
+  },
+  {
+    "id": "caledonia",
+    "name": "Caledonia",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.46539,
+      43.69235
+    ]
+  },
+  {
+    "id": "fairbank",
+    "name": "Fairbank",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.44944,
+      43.69577
+    ]
+  },
+  {
+    "id": "oakwood",
+    "name": "Oakwood",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.44296,
+      43.69749
+    ]
+  },
+  {
+    "id": "forest-hill",
+    "name": "Forest Hill",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.42531,
+      43.7012
+    ]
+  },
+  {
+    "id": "chaplin",
+    "name": "Chaplin",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.41741,
+      43.70296
+    ]
+  },
+  {
+    "id": "avenue",
+    "name": "Avenue",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.4089,
+      43.70481
+    ]
+  },
+  {
+    "id": "mount-pleasant",
+    "name": "Mount Pleasant",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.39044,
+      43.70859
+    ]
+  },
+  {
+    "id": "leaside",
+    "name": "Leaside",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.37669,
+      43.71088
+    ]
+  },
+  {
+    "id": "laird",
+    "name": "Laird",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.36503,
+      43.71327
+    ]
+  },
+  {
+    "id": "sunnybrook-park",
+    "name": "Sunnybrook Park",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.34914,
+      43.71731
+    ]
+  },
+  {
+    "id": "don-valley",
+    "name": "Don Valley",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.33918,
+      43.72002
+    ]
+  },
+  {
+    "id": "aga-khan-park-and-museum",
+    "name": "Aga Khan Park & Museum",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.33269,
+      43.72242
+    ]
+  },
+  {
+    "id": "wynford",
+    "name": "Wynford",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.32666,
+      43.72409
+    ]
+  },
+  {
+    "id": "sloane",
+    "name": "Sloane",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.31268,
+      43.72592
+    ]
+  },
+  {
+    "id": "oconnor",
+    "name": "O'Connor",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.30179,
+      43.72483
+    ]
+  },
+  {
+    "id": "pharmacy",
+    "name": "Pharmacy",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.29675,
+      43.72584
+    ]
+  },
+  {
+    "id": "hakimi-lebovic",
+    "name": "Hakimi Lebovic",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.29156,
+      43.727
+    ]
+  },
+  {
+    "id": "golden-mile",
+    "name": "Golden Mile",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.28763,
+      43.72787
+    ]
+  },
+  {
+    "id": "birchmount",
+    "name": "Birchmount",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.27706,
+      43.73018
+    ]
+  },
+  {
+    "id": "ionview",
+    "name": "Ionview",
+    "lines": [
+      5
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.27209,
+      43.73132
+    ]
+  },
+  {
+    "id": "humber-college",
+    "name": "Humber College",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.60153,
+      43.7299
+    ]
+  },
+  {
+    "id": "westmore",
+    "name": "Westmore",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.60071,
+      43.73475
+    ]
+  },
+  {
+    "id": "martin-grove",
+    "name": "Martin Grove",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.59192,
+      43.73674
+    ]
+  },
+  {
+    "id": "albion",
+    "name": "Albion",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.58918,
+      43.74117
+    ]
+  },
+  {
+    "id": "stevenson",
+    "name": "Stevenson",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.58695,
+      43.74322
+    ]
+  },
+  {
+    "id": "mount-olive",
+    "name": "Mount Olive",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.58178,
+      43.74331
+    ]
+  },
+  {
+    "id": "rowntree-mills",
+    "name": "Rowntree Mills",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.56858,
+      43.74632
+    ]
+  },
+  {
+    "id": "pearldale",
+    "name": "Pearldale",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.5625,
+      43.74774
+    ]
+  },
+  {
+    "id": "duncanwoods",
+    "name": "Duncanwoods",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.55756,
+      43.74883
+    ]
+  },
+  {
+    "id": "milvan-rumike",
+    "name": "Milvan Rumike",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.55231,
+      43.74997
+    ]
+  },
+  {
+    "id": "emery",
+    "name": "Emery",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.5424,
+      43.75208
+    ]
+  },
+  {
+    "id": "signet-arrow",
+    "name": "Signet Arrow",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.53623,
+      43.75329
+    ]
+  },
+  {
+    "id": "norfinch-oakdale",
+    "name": "Norfinch Oakdale",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.52425,
+      43.75594
+    ]
+  },
+  {
+    "id": "jane-and-finch",
+    "name": "Jane and Finch",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.51771,
+      43.75725
+    ]
+  },
+  {
+    "id": "driftwood",
+    "name": "Driftwood",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.51336,
+      43.75807
+    ]
+  },
+  {
+    "id": "tobermory",
+    "name": "Tobermory",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.50792,
+      43.75934
+    ]
+  },
+  {
+    "id": "sentinel",
+    "name": "Sentinel",
+    "lines": [
+      6
+    ],
+    "isTransfer": false,
+    "coordinates": [
+      -79.50004,
+      43.76109
+    ]
+  }
+]
