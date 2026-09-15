@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import StationAutocompleteField from "./StationAutocompleteField";
 import FormField from "./FormField";
 import DepartureToggle from "./DepartureToggle";
 import CommuteResultCard from "./CommuteResultCard";
@@ -14,8 +15,20 @@ import {
   SwapIcon,
 } from "@/components/icons";
 import { getTrafficEstimate } from "@/lib/traffic";
+import { getStationByNameOrId } from "@/lib/geo/subwayGeoJSON";
 import type { DepartureMode } from "@/lib/types";
-import type { TrafficResponse } from "@/types/traffic";
+import type { TransitCommuteResponse } from "@/types/traffic";
+
+/**
+ * Resolves free-typed rider input to the station registry's bare canonical
+ * name ("Union", "Bloor-Yonge") before it's sent to the backend. Falls back
+ * to the raw trimmed text for anything the registry can't resolve, so the
+ * backend's own matching still gets a chance to handle it.
+ */
+function resolveStationInput(value: string): string {
+  const trimmed = value.trim();
+  return getStationByNameOrId(trimmed)?.name ?? trimmed;
+}
 
 function getTodayISODate(): string {
   return new Date().toISOString().slice(0, 10);
@@ -28,15 +41,27 @@ function getCurrentTime(): string {
   ).padStart(2, "0")}`;
 }
 
-export default function CommuteForm() {
-  const [from, setFrom] = useState("");
-  const [destination, setDestination] = useState("");
+interface CommuteFormProps {
+  from: string;
+  destination: string;
+  onFromChange: (value: string) => void;
+  onDestinationChange: (value: string) => void;
+  onResult?: (result: TransitCommuteResponse | null) => void;
+}
+
+export default function CommuteForm({
+  from,
+  destination,
+  onFromChange,
+  onDestinationChange,
+  onResult,
+}: CommuteFormProps) {
   const [departureMode, setDepartureMode] = useState<DepartureMode>("now");
   const [date, setDate] = useState(getTodayISODate);
   const [time, setTime] = useState(getCurrentTime);
   const [isCalculating, setIsCalculating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [result, setResult] = useState<TrafficResponse | null>(null);
+  const [result, setResult] = useState<TransitCommuteResponse | null>(null);
 
   const isLeavingLater = departureMode === "later";
   const canSubmit =
@@ -45,8 +70,8 @@ export default function CommuteForm() {
     (!isLeavingLater || (date !== "" && time !== ""));
 
   function handleSwap() {
-    setFrom(destination);
-    setDestination(from);
+    onFromChange(destination);
+    onDestinationChange(from);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -54,16 +79,22 @@ export default function CommuteForm() {
     setIsCalculating(true);
     setErrorMessage(null);
     setResult(null);
+    onResult?.(null);
 
     try {
       const estimate = await getTrafficEstimate({
-        origin: from,
-        destination,
+        origin: resolveStationInput(from),
+        destination: resolveStationInput(destination),
         departureTime: isLeavingLater ? `${date}T${time}` : undefined,
       });
       setResult(estimate);
-    } catch {
-      setErrorMessage("Couldn't reach the traffic service. Is the backend running?");
+      onResult?.(estimate);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Couldn't reach the transit service. Is the backend running?"
+      );
     } finally {
       setIsCalculating(false);
     }
@@ -75,13 +106,13 @@ export default function CommuteForm() {
       className="rounded-3xl border border-neutral-200 bg-white/90 p-5 text-neutral-900 shadow-xl shadow-black/5 backdrop-blur-xl sm:p-8 dark:border-neutral-800 dark:bg-neutral-900/80 dark:text-white dark:shadow-2xl dark:shadow-black/40"
     >
       <div className="flex flex-col gap-4">
-        <FormField
+        <StationAutocompleteField
           id="from"
           label="From"
           icon={<MapPinIcon className="h-5 w-5" />}
-          placeholder="Current location or address"
+          placeholder="Departure station"
           value={from}
-          onChange={(e) => setFrom(e.target.value)}
+          onChange={onFromChange}
         />
 
         <button
@@ -93,13 +124,13 @@ export default function CommuteForm() {
           <SwapIcon className="h-4 w-4 rotate-90" />
         </button>
 
-        <FormField
+        <StationAutocompleteField
           id="destination"
           label="Destination"
           icon={<FlagIcon className="h-5 w-5" />}
-          placeholder="Where are you headed?"
+          placeholder="Destination station"
           value={destination}
-          onChange={(e) => setDestination(e.target.value)}
+          onChange={onDestinationChange}
         />
       </div>
 

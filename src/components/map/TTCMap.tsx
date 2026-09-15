@@ -4,13 +4,23 @@ import { useEffect, useRef } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { CARTO_DARK_STYLE, CARTO_LIGHT_STYLE, DEFAULT_MAP_ZOOM, TORONTO_CENTER } from "@/lib/constants";
-import { linesGeoJSON, stationsGeoJSON } from "@/lib/geo/subwayGeoJSON";
+import {
+  findStationByName,
+  getRouteCoordinates,
+  linesGeoJSON,
+  stationsGeoJSON,
+} from "@/lib/geo/subwayGeoJSON";
 import { useIsDarkMode } from "@/components/theme/useIsDarkMode";
+import { getSlowZones } from "@/lib/traffic";
+import { formatStationLabel } from "@/lib/stationDisplay";
+import type { TransitCommuteResponse } from "@/types/traffic";
 
 interface TTCMapProps {
   className?: string;
   /** Called when a rider picks "Set as Departure" on a station popup. */
   onSelectDeparture?: (stationName: string) => void;
+  /** The most recently calculated commute, used to glow the route + fit the map to it. */
+  commuteResult?: TransitCommuteResponse | null;
 }
 
 // maplibre-gl's worker script imports a sibling chunk via a relative path;
@@ -22,8 +32,21 @@ maplibregl.setWorkerUrl("/maplibre-gl-worker.mjs");
 
 const LINES_SOURCE_ID = "ttc-lines";
 const LINES_LAYER_ID = "ttc-lines-layer";
+const SLOW_ZONES_SOURCE_ID = "ttc-slow-zones";
+const SLOW_ZONES_LAYER_ID = "ttc-slow-zones-layer";
+const ROUTE_SOURCE_ID = "ttc-route-highlight";
+const ROUTE_GLOW_LAYER_ID = "ttc-route-highlight-glow";
+const ROUTE_LINE_LAYER_ID = "ttc-route-highlight-line";
 const STATIONS_SOURCE_ID = "ttc-stations";
 const STATIONS_LAYER_ID = "ttc-stations-layer";
+const ENDPOINTS_SOURCE_ID = "ttc-route-endpoints";
+const ENDPOINTS_GLOW_LAYER_ID = "ttc-route-endpoints-glow";
+const ENDPOINTS_LAYER_ID = "ttc-route-endpoints-layer";
+
+const EMPTY_FEATURE_COLLECTION: GeoJSON.FeatureCollection = {
+  type: "FeatureCollection",
+  features: [],
+};
 
 const lineMetaById: Map<number, (typeof linesGeoJSON.features)[number]["properties"]> = new Map(
   linesGeoJSON.features.map((f) => [f.properties.lineId, f.properties])
@@ -38,7 +61,7 @@ function buildPopupContent(
 
   const title = document.createElement("p");
   title.className = "mb-2 font-bold text-neutral-900";
-  title.textContent = station.name;
+  title.textContent = formatStationLabel(station.name);
   container.appendChild(title);
 
   const badgeRow = document.createElement("div");
@@ -62,19 +85,13 @@ function buildPopupContent(
   button.className =
     "w-full rounded-full bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700";
   button.textContent = "Set as Departure";
-  button.addEventListener("click", () => onSelectDeparture(station.name));
+  button.addEventListener("click", () => onSelectDeparture(formatStationLabel(station.name)));
   container.appendChild(button);
 
   return container;
 }
 
-/**
- * Adds (or re-adds) the subway line/station layers. Safe to call repeatedly —
- * each source/layer is only added if missing, which matters both for hot
- * reloads and for re-applying after a basemap style swap (`setStyle` wipes
- * any layers not present in the new style.json).
- */
-function addTTCLayers(map: maplibregl.Map) {
+function addBaseLineLayer(map: maplibregl.Map) {
   if (!map.getSource(LINES_SOURCE_ID)) {
     map.addSource(LINES_SOURCE_ID, { type: "geojson", data: linesGeoJSON });
   }
@@ -83,17 +100,62 @@ function addTTCLayers(map: maplibregl.Map) {
       id: LINES_LAYER_ID,
       type: "line",
       source: LINES_SOURCE_ID,
-      layout: {
-        "line-cap": "round",
-        "line-join": "round",
-      },
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "colorHex"], "line-width": 4 },
+    });
+  }
+}
+
+function addSlowZoneLayer(map: maplibregl.Map, data: GeoJSON.FeatureCollection) {
+  if (!map.getSource(SLOW_ZONES_SOURCE_ID)) {
+    map.addSource(SLOW_ZONES_SOURCE_ID, { type: "geojson", data });
+  }
+  if (!map.getLayer(SLOW_ZONES_LAYER_ID)) {
+    map.addLayer({
+      id: SLOW_ZONES_LAYER_ID,
+      type: "line",
+      source: SLOW_ZONES_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
       paint: {
-        "line-color": ["get", "colorHex"],
-        "line-width": 4,
+        "line-color": "#f59e0b",
+        "line-width": 6,
+        "line-dasharray": [1.4, 1.4],
+        "line-opacity": 0.95,
       },
     });
   }
+}
 
+function addRouteHighlightLayers(map: maplibregl.Map, data: GeoJSON.FeatureCollection) {
+  if (!map.getSource(ROUTE_SOURCE_ID)) {
+    map.addSource(ROUTE_SOURCE_ID, { type: "geojson", data });
+  }
+  if (!map.getLayer(ROUTE_GLOW_LAYER_ID)) {
+    map.addLayer({
+      id: ROUTE_GLOW_LAYER_ID,
+      type: "line",
+      source: ROUTE_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": ["get", "colorHex"],
+        "line-width": 18,
+        "line-blur": 8,
+        "line-opacity": 0.6,
+      },
+    });
+  }
+  if (!map.getLayer(ROUTE_LINE_LAYER_ID)) {
+    map.addLayer({
+      id: ROUTE_LINE_LAYER_ID,
+      type: "line",
+      source: ROUTE_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#ffffff", "line-width": 3, "line-opacity": 0.9 },
+    });
+  }
+}
+
+function addStationsLayer(map: maplibregl.Map) {
   if (!map.getSource(STATIONS_SOURCE_ID)) {
     map.addSource(STATIONS_SOURCE_ID, { type: "geojson", data: stationsGeoJSON });
   }
@@ -112,11 +174,152 @@ function addTTCLayers(map: maplibregl.Map) {
   }
 }
 
-export default function TTCMap({ className = "", onSelectDeparture }: TTCMapProps) {
+function addEndpointHighlightLayers(map: maplibregl.Map, data: GeoJSON.FeatureCollection) {
+  if (!map.getSource(ENDPOINTS_SOURCE_ID)) {
+    map.addSource(ENDPOINTS_SOURCE_ID, { type: "geojson", data });
+  }
+  if (!map.getLayer(ENDPOINTS_GLOW_LAYER_ID)) {
+    map.addLayer({
+      id: ENDPOINTS_GLOW_LAYER_ID,
+      type: "circle",
+      source: ENDPOINTS_SOURCE_ID,
+      paint: {
+        "circle-radius": 18,
+        "circle-color": ["match", ["get", "role"], "origin", "#34d399", "#f87171"],
+        "circle-blur": 0.9,
+        "circle-opacity": 0.65,
+      },
+    });
+  }
+  if (!map.getLayer(ENDPOINTS_LAYER_ID)) {
+    map.addLayer({
+      id: ENDPOINTS_LAYER_ID,
+      type: "circle",
+      source: ENDPOINTS_SOURCE_ID,
+      paint: {
+        "circle-radius": 8,
+        "circle-color": ["match", ["get", "role"], "origin", "#10b981", "#ef4444"],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 2,
+      },
+    });
+  }
+}
+
+function computeRouteFeatures(result: TransitCommuteResponse | null): {
+  route: GeoJSON.FeatureCollection;
+  endpoints: GeoJSON.FeatureCollection;
+  bounds: maplibregl.LngLatBounds | null;
+} {
+  if (!result) {
+    return { route: EMPTY_FEATURE_COLLECTION, endpoints: EMPTY_FEATURE_COLLECTION, bounds: null };
+  }
+
+  const originStation = findStationByName(result.origin);
+  const destinationStation = findStationByName(result.destination);
+  if (!originStation || !destinationStation) {
+    return { route: EMPTY_FEATURE_COLLECTION, endpoints: EMPTY_FEATURE_COLLECTION, bounds: null };
+  }
+
+  const coordinates = getRouteCoordinates(result.line, originStation.id, destinationStation.id);
+  const lineMeta = lineMetaById.get(result.line);
+
+  const route: GeoJSON.FeatureCollection =
+    coordinates.length > 1
+      ? {
+          type: "FeatureCollection",
+          features: [
+            {
+              type: "Feature",
+              geometry: { type: "LineString", coordinates },
+              properties: { colorHex: lineMeta?.colorHex ?? "#ffffff" },
+            },
+          ],
+        }
+      : EMPTY_FEATURE_COLLECTION;
+
+  const endpoints: GeoJSON.FeatureCollection = {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: originStation.coordinates },
+        properties: { role: "origin", name: originStation.name },
+      },
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: destinationStation.coordinates },
+        properties: { role: "destination", name: destinationStation.name },
+      },
+    ],
+  };
+
+  const bounds =
+    coordinates.length > 0
+      ? coordinates.reduce(
+          (acc, coord) => acc.extend(coord),
+          new maplibregl.LngLatBounds(coordinates[0], coordinates[0])
+        )
+      : null;
+
+  return { route, endpoints, bounds };
+}
+
+export default function TTCMap({
+  className = "",
+  onSelectDeparture,
+  commuteResult = null,
+}: TTCMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const isDark = useIsDarkMode();
   const hasSetInitialStyleRef = useRef(false);
+
+  const slowZonesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+  const routeDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+  const endpointsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+
+  // Fetch live slow zones once on mount and draw them as a dashed amber
+  // overlay on top of the affected track segments.
+  useEffect(() => {
+    let cancelled = false;
+
+    getSlowZones()
+      .then((data) => {
+        if (cancelled) return;
+
+        const features: GeoJSON.Feature[] = [];
+        for (const zone of data.slowZones) {
+          if (!zone.fromStationId || !zone.toStationId) continue;
+          const from = stationsGeoJSON.features.find((f) => f.properties.id === zone.fromStationId);
+          const to = stationsGeoJSON.features.find((f) => f.properties.id === zone.toStationId);
+          if (!from || !to) continue;
+
+          features.push({
+            type: "Feature",
+            geometry: {
+              type: "LineString",
+              coordinates: [from.geometry.coordinates, to.geometry.coordinates],
+            },
+            properties: { line: zone.line, direction: zone.direction },
+          });
+        }
+
+        const geojson: GeoJSON.FeatureCollection = { type: "FeatureCollection", features };
+        slowZonesDataRef.current = geojson;
+        (mapRef.current?.getSource(SLOW_ZONES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(
+          geojson
+        );
+      })
+      .catch(() => {
+        // The slow-zone overlay is a nice-to-have visual, not the critical
+        // path — a failed fetch just leaves the map without it.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -146,7 +349,11 @@ export default function TTCMap({ className = "", onSelectDeparture }: TTCMapProp
     // "style.load" (unlike "load") fires again every time setStyle() swaps
     // the basemap, which is exactly when our custom layers need re-adding.
     map.on("style.load", () => {
-      addTTCLayers(map);
+      addBaseLineLayer(map);
+      addSlowZoneLayer(map, slowZonesDataRef.current);
+      addRouteHighlightLayers(map, routeDataRef.current);
+      addStationsLayer(map);
+      addEndpointHighlightLayers(map, endpointsDataRef.current);
 
       if (interactionsBound) return;
       interactionsBound = true;
@@ -194,6 +401,23 @@ export default function TTCMap({ className = "", onSelectDeparture }: TTCMapProp
 
     map.setStyle(isDark ? CARTO_DARK_STYLE : CARTO_LIGHT_STYLE);
   }, [isDark]);
+
+  // Glow the route + highlight both endpoints whenever a commute is calculated.
+  useEffect(() => {
+    const { route, endpoints, bounds } = computeRouteFeatures(commuteResult);
+    routeDataRef.current = route;
+    endpointsDataRef.current = endpoints;
+
+    const map = mapRef.current;
+    if (!map) return;
+
+    (map.getSource(ROUTE_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(route);
+    (map.getSource(ENDPOINTS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(endpoints);
+
+    if (bounds) {
+      map.fitBounds(bounds, { padding: 96, duration: 800, maxZoom: 15 });
+    }
+  }, [commuteResult]);
 
   return (
     <div

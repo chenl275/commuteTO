@@ -1,34 +1,24 @@
-import hashlib
-import math
-import os
-import random
+"""Subway commute-time modeling: station-hop schedule + live slow zone delay."""
+
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
-import httpx
+from .schemas import ActiveSlowZone, TransitCommuteRequest, TransitCommuteResponse
+from .services import stations
+from .services.slow_zones_scraper import get_slow_zones
 
-from .schemas import TrafficRequest, TrafficResponse
+MINUTES_PER_STATION_HOP = 1.5
 
-GOOGLE_DISTANCE_MATRIX_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
 
-# Assumed average speed for the simulated fallback, tuned for city driving
-# with signals/congestion rather than highway speeds.
-AVERAGE_URBAN_SPEED_KMH = 28.0
-EARTH_RADIUS_KM = 6371.0
+class TransitCommuteError(ValueError):
+    """Raised when a request can't be resolved to a supported subway trip."""
 
 
 def _is_coordinates(value: Union[str, Tuple[float, float]]) -> bool:
     return isinstance(value, (list, tuple))
 
 
-def _format_location(value: Union[str, Tuple[float, float]]) -> str:
-    if _is_coordinates(value):
-        lat, lng = value
-        return f"{lat},{lng}"
-    return value
-
-
-def _parse_departure_time(departure_time: Optional[str]) -> datetime:
+def _parse_departure_time(departure_time: str | None) -> datetime:
     if not departure_time:
         return datetime.now()
     try:
@@ -37,144 +27,61 @@ def _parse_departure_time(departure_time: Optional[str]) -> datetime:
         return datetime.now()
 
 
-def _haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    lat1, lon1 = a
-    lat2, lon2 = b
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    h = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+def _resolve_station(value: Union[str, Tuple[float, float]]) -> dict:
+    if _is_coordinates(value):
+        station = stations.nearest_station(tuple(value))
+        if station is None:
+            raise TransitCommuteError("No TTC subway station data is available.")
+        return station
+
+    station = stations.find_station(value)
+    if station is None:
+        raise TransitCommuteError(f'Unrecognized TTC station: "{value}"')
+    return station
 
 
-def _seeded_random(*parts: str) -> random.Random:
-    # A stable hash (unlike Python's salted str hash) so the same
-    # origin/destination/day always simulates the same-feeling result.
-    digest = hashlib.md5("|".join(parts).encode()).hexdigest()
-    return random.Random(int(digest[:8], 16))
+def _shared_line(origin: dict, destination: dict) -> int:
+    shared = sorted(set(origin["lines"]) & set(destination["lines"]) & {1, 2})
+    if not shared:
+        raise TransitCommuteError(
+            f"\"{origin['name']}\" and \"{destination['name']}\" aren't both on Line 1 "
+            "or Line 2 — multi-line transfer routing isn't supported yet."
+        )
+    return shared[0]
 
 
-def _format_duration(total_seconds: int) -> str:
-    minutes = round(total_seconds / 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours} hour{'s' if hours != 1 else ''} {minutes} min"
-    return f"{minutes} min"
+async def get_transit_commute_estimate(request: TransitCommuteRequest) -> TransitCommuteResponse:
+    departure = _parse_departure_time(request.departure_time)
 
+    origin_station = _resolve_station(request.origin)
+    destination_station = _resolve_station(request.destination)
+    line = _shared_line(origin_station, destination_station)
 
-def _simulate(request: TrafficRequest, departure: datetime) -> TrafficResponse:
-    origin, destination = request.origin, request.destination
-    rng = _seeded_random(str(origin), str(destination), departure.date().isoformat())
+    hops = stations.hops_between(line, origin_station["id"], destination_station["id"])
+    if hops is None:
+        raise TransitCommuteError("Couldn't find a route between these stations.")
 
-    if _is_coordinates(origin) and _is_coordinates(destination):
-        # Real coordinates: base the estimate on actual distance, with a
-        # road-vs-straight-line fudge factor since streets aren't straight.
-        straight_line_km = _haversine_km(tuple(origin), tuple(destination))
-        distance_km = max(straight_line_km * 1.35, 0.5)
-    else:
-        # No coordinates to work with (free-text addresses) — simulate a
-        # plausible intra-city trip distance instead.
-        distance_km = round(rng.uniform(4.0, 28.0), 1)
+    scheduled_minutes = hops * MINUTES_PER_STATION_HOP
 
-    baseline_minutes = max(distance_km / AVERAGE_URBAN_SPEED_KMH * 60, 4.0)
-    traffic_multiplier = rng.uniform(1.05, 1.55)
-    traffic_minutes = baseline_minutes * traffic_multiplier
+    slow_zones = await get_slow_zones()
+    zones_on_route = stations.zones_along_route(
+        line, origin_station["id"], destination_station["id"], slow_zones["slowZones"]
+    )
+    delay_minutes = sum(zone["delaySeconds"] for zone in zones_on_route) / 60
 
-    baseline_seconds = round(baseline_minutes * 60)
-    traffic_seconds = round(traffic_minutes * 60)
-    delay_minutes = max(round((traffic_seconds - baseline_seconds) / 60), 0)
+    total_minutes = scheduled_minutes + delay_minutes
+    arrival = departure + timedelta(minutes=total_minutes)
 
-    arrival = departure + timedelta(seconds=traffic_seconds)
-
-    return TrafficResponse(
-        origin=_format_location(origin),
-        destination=_format_location(destination),
-        distance_meters=round(distance_km * 1000),
-        distance_text=f"{distance_km:.1f} km",
-        duration_seconds=baseline_seconds,
-        duration_text=_format_duration(baseline_seconds),
-        duration_in_traffic_seconds=traffic_seconds,
-        duration_in_traffic_text=_format_duration(traffic_seconds),
-        traffic_delay_minutes=delay_minutes,
+    return TransitCommuteResponse(
+        origin=origin_station["name"],
+        destination=destination_station["name"],
+        line=line,
+        station_hops=hops,
+        scheduled_duration_minutes=round(scheduled_minutes, 1),
+        slow_zone_delay_minutes=round(delay_minutes, 1),
+        total_duration_minutes=round(total_minutes, 1),
+        active_slow_zones=[ActiveSlowZone(**zone) for zone in zones_on_route],
         departure_time=departure.isoformat(),
         arrival_time=arrival.isoformat(),
-        source="simulated",
+        source=slow_zones["source"],
     )
-
-
-async def _query_google(
-    request: TrafficRequest, departure: datetime, api_key: str
-) -> Optional[TrafficResponse]:
-    now = datetime.now()
-    # Google's Distance Matrix API only accepts "now" or a future Unix
-    # timestamp for departure_time — never a past one.
-    use_now = departure <= now
-    params = {
-        "origins": _format_location(request.origin),
-        "destinations": _format_location(request.destination),
-        "departure_time": "now" if use_now else str(int(departure.timestamp())),
-        "units": "metric",
-        "key": api_key,
-    }
-
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        response = await client.get(GOOGLE_DISTANCE_MATRIX_URL, params=params)
-        response.raise_for_status()
-        payload = response.json()
-
-    if payload.get("status") != "OK":
-        return None
-
-    rows = payload.get("rows") or []
-    if not rows or not rows[0].get("elements"):
-        return None
-
-    element = rows[0]["elements"][0]
-    if element.get("status") != "OK":
-        return None
-
-    distance = element["distance"]
-    duration = element["duration"]
-    duration_in_traffic = element.get("duration_in_traffic", duration)
-
-    departure_used = now if use_now else departure
-    arrival = departure_used + timedelta(seconds=duration_in_traffic["value"])
-    delay_minutes = max(round((duration_in_traffic["value"] - duration["value"]) / 60), 0)
-
-    origin_address = (payload.get("origin_addresses") or [_format_location(request.origin)])[0]
-    destination_address = (
-        payload.get("destination_addresses") or [_format_location(request.destination)]
-    )[0]
-
-    return TrafficResponse(
-        origin=origin_address,
-        destination=destination_address,
-        distance_meters=distance["value"],
-        distance_text=distance["text"],
-        duration_seconds=duration["value"],
-        duration_text=duration["text"],
-        duration_in_traffic_seconds=duration_in_traffic["value"],
-        duration_in_traffic_text=duration_in_traffic.get(
-            "text", _format_duration(duration_in_traffic["value"])
-        ),
-        traffic_delay_minutes=delay_minutes,
-        departure_time=departure_used.isoformat(),
-        arrival_time=arrival.isoformat(),
-        source="google_maps",
-    )
-
-
-async def get_traffic_estimate(request: TrafficRequest) -> TrafficResponse:
-    departure = _parse_departure_time(request.departure_time)
-    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
-
-    if api_key:
-        try:
-            result = await _query_google(request, departure, api_key)
-            if result is not None:
-                return result
-        except (httpx.HTTPError, KeyError, ValueError):
-            # Fall through to the simulated estimate below.
-            pass
-
-    return _simulate(request, departure)

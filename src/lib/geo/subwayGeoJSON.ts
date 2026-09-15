@@ -1,5 +1,6 @@
 import stations from "@/data/ttc-stations.json";
 import type { LineId, Station } from "@/types/transit";
+import { stationMatchKey, stripStationSuffix } from "@/lib/stationDisplay";
 
 const typedStations = stations as Station[];
 
@@ -216,7 +217,63 @@ export const linesGeoJSON: GeoJSON.FeatureCollection<GeoJSON.LineString, LinePro
   })),
 };
 
-/** All station names, alphabetically sorted (e.g. for search/autocomplete). */
-export function getAllStationNames(): string[] {
-  return typedStations.map((station) => station.name).sort((a, b) => a.localeCompare(b));
+/** All stations, alphabetically sorted by name (e.g. for search/autocomplete). */
+export function getAllStations(): Station[] {
+  return [...typedStations].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Official TTC line color by line number, e.g. for badges/pills next to a station name. */
+export const lineColorById: Record<number, string> = Object.fromEntries(
+  LINE_DEFINITIONS.map((line) => [line.id, line.colorHex])
+);
+
+/** Case-insensitive exact-name lookup, e.g. for resolving a backend response's station name. */
+export function findStationByName(name: string): Station | undefined {
+  const normalized = name.trim().toLowerCase();
+  return typedStations.find((station) => station.name.toLowerCase() === normalized);
+}
+
+/**
+ * Resolves free-typed rider input — a station id ("bloor-yonge"), a bare
+ * canonical name ("Union"), a display label with a "Station"/"Subway
+ * Station" suffix ("Union Station"), or an unambiguous partial name
+ * ("bloor") — to its canonical Station record. Used to normalize origin/
+ * destination text before it's sent to the backend.
+ */
+export function getStationByNameOrId(query: string): Station | undefined {
+  const cleaned = stripStationSuffix(query);
+  if (!cleaned) return undefined;
+
+  const byId = stationsById.get(cleaned.toLowerCase());
+  if (byId) return byId;
+
+  const cleanedLower = cleaned.toLowerCase();
+  const exactNameMatch = typedStations.find((station) => station.name.toLowerCase() === cleanedLower);
+  if (exactNameMatch) return exactNameMatch;
+
+  const key = stationMatchKey(cleaned);
+  if (!key) return undefined;
+  const partialMatches = typedStations.filter((station) => stationMatchKey(station.name).includes(key));
+  return partialMatches.length === 1 ? partialMatches[0] : undefined;
+}
+
+/**
+ * Coordinates for every station between `fromStationId` and `toStationId`
+ * (inclusive) along `lineId`, in the order travelled — for drawing a
+ * highlighted trip path on the map.
+ */
+export function getRouteCoordinates(
+  lineId: number,
+  fromStationId: string,
+  toStationId: string
+): [number, number][] {
+  const line = LINE_DEFINITIONS.find((definition) => definition.id === lineId);
+  if (!line) return [];
+
+  const fromIndex = line.stationIds.indexOf(fromStationId);
+  const toIndex = line.stationIds.indexOf(toStationId);
+  if (fromIndex === -1 || toIndex === -1) return [];
+
+  const [start, end] = fromIndex <= toIndex ? [fromIndex, toIndex] : [toIndex, fromIndex];
+  return line.stationIds.slice(start, end + 1).map((id) => getStation(id).coordinates);
 }
