@@ -36,6 +36,33 @@ export interface SlowZonesResponse {
   source: TransitSource;
 }
 
+export type AlertCategory = "closure" | "delay" | "maintenance";
+
+/** A live TTC service alert (closure, incident delay, or maintenance) affecting a subway line. */
+export interface ServiceAlert {
+  id: string;
+  line: number;
+  category: AlertCategory;
+  headline: string;
+  description: string;
+  direction: string;
+  fromStation: string;
+  toStation: string;
+  affectedStationIds: string[];
+  shuttleService: boolean;
+  postedAt: string | null;
+  activeUntil: string | null;
+  /** True when a recognized nightly-closure alert doesn't apply to the
+   * current/requested travel time — an informational notice, not an active disruption. */
+  isUpcomingNotice: boolean;
+}
+
+export interface AlertsResponse {
+  alerts: ServiceAlert[];
+  lastUpdated: string | null;
+  source: TransitSource;
+}
+
 export interface TransitCommuteResponse {
   origin: string;
   destination: string;
@@ -43,8 +70,12 @@ export interface TransitCommuteResponse {
   stationHops: number;
   scheduledDurationMinutes: number;
   slowZoneDelayMinutes: number;
+  slowZoneDelaySeconds: number;
+  alertDelayMinutes: number;
   totalDurationMinutes: number;
   activeSlowZones: ActiveSlowZone[];
+  isDisrupted: boolean;
+  activeAlertsOnRoute: ServiceAlert[];
   departureTime: string;
   arrivalTime: string;
   source: TransitSource;

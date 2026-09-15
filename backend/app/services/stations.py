@@ -186,6 +186,31 @@ def hops_between(line: int, from_id: str, to_id: str) -> Optional[int]:
     return abs(from_index - to_index)
 
 
+def stations_on_route(line: int, origin_id: str, destination_id: str) -> list[str]:
+    """Station ids actually traveled (inclusive of both ends), in whichever
+    order they appear on the line — direction-agnostic, unlike zones_along_route."""
+    ids = LINE_STATION_IDS.get(line)
+    if not ids or origin_id not in ids or destination_id not in ids:
+        return []
+    start, end = sorted((ids.index(origin_id), ids.index(destination_id)))
+    return ids[start : end + 1]
+
+
+def alerts_along_route(
+    line: int, origin_id: str, destination_id: str, alerts: list[dict]
+) -> list[dict]:
+    """Active service alerts whose affected stations overlap the traveled path."""
+    traveled = set(stations_on_route(line, origin_id, destination_id))
+    if not traveled:
+        return []
+
+    return [
+        alert
+        for alert in alerts
+        if alert.get("line") == line and traveled & set(alert.get("affectedStationIds") or [])
+    ]
+
+
 def zones_along_route(
     line: int, origin_id: str, destination_id: str, zones: list[dict]
 ) -> list[dict]:

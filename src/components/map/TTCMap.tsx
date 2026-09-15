@@ -11,7 +11,7 @@ import {
   stationsGeoJSON,
 } from "@/lib/geo/subwayGeoJSON";
 import { useIsDarkMode } from "@/components/theme/useIsDarkMode";
-import { getSlowZones } from "@/lib/traffic";
+import { getAlerts, getSlowZones } from "@/lib/traffic";
 import { formatStationLabel } from "@/lib/stationDisplay";
 import type { TransitCommuteResponse } from "@/types/traffic";
 
@@ -34,6 +34,9 @@ const LINES_SOURCE_ID = "ttc-lines";
 const LINES_LAYER_ID = "ttc-lines-layer";
 const SLOW_ZONES_SOURCE_ID = "ttc-slow-zones";
 const SLOW_ZONES_LAYER_ID = "ttc-slow-zones-layer";
+const DISRUPTIONS_SOURCE_ID = "ttc-disruptions";
+const DISRUPTIONS_GLOW_LAYER_ID = "ttc-disruptions-glow";
+const DISRUPTIONS_LAYER_ID = "ttc-disruptions-layer";
 const ROUTE_SOURCE_ID = "ttc-route-highlight";
 const ROUTE_GLOW_LAYER_ID = "ttc-route-highlight-glow";
 const ROUTE_LINE_LAYER_ID = "ttc-route-highlight-line";
@@ -91,6 +94,29 @@ function buildPopupContent(
   return container;
 }
 
+function buildDisruptionTooltipContent(properties: { headline: string; description: string }): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "max-w-[240px] p-1";
+
+  const badge = document.createElement("span");
+  badge.className =
+    "mb-1 inline-block rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white";
+  badge.textContent = "Service Disruption";
+  container.appendChild(badge);
+
+  const headline = document.createElement("p");
+  headline.className = "mt-1 text-xs font-semibold text-neutral-900";
+  headline.textContent = properties.headline;
+  container.appendChild(headline);
+
+  const description = document.createElement("p");
+  description.className = "mt-1 text-[11px] leading-snug text-neutral-600";
+  description.textContent = properties.description;
+  container.appendChild(description);
+
+  return container;
+}
+
 function addBaseLineLayer(map: maplibregl.Map) {
   if (!map.getSource(LINES_SOURCE_ID)) {
     map.addSource(LINES_SOURCE_ID, { type: "geojson", data: linesGeoJSON });
@@ -121,6 +147,35 @@ function addSlowZoneLayer(map: maplibregl.Map, data: GeoJSON.FeatureCollection) 
         "line-width": 6,
         "line-dasharray": [1.4, 1.4],
         "line-opacity": 0.95,
+      },
+    });
+  }
+}
+
+function addDisruptionLayers(map: maplibregl.Map, data: GeoJSON.FeatureCollection) {
+  if (!map.getSource(DISRUPTIONS_SOURCE_ID)) {
+    map.addSource(DISRUPTIONS_SOURCE_ID, { type: "geojson", data });
+  }
+  if (!map.getLayer(DISRUPTIONS_GLOW_LAYER_ID)) {
+    map.addLayer({
+      id: DISRUPTIONS_GLOW_LAYER_ID,
+      type: "line",
+      source: DISRUPTIONS_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#dc2626", "line-width": 14, "line-blur": 6, "line-opacity": 0.35 },
+    });
+  }
+  if (!map.getLayer(DISRUPTIONS_LAYER_ID)) {
+    map.addLayer({
+      id: DISRUPTIONS_LAYER_ID,
+      type: "line",
+      source: DISRUPTIONS_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#dc2626",
+        "line-width": 6,
+        "line-dasharray": [0.2, 1.6],
+        "line-opacity": 1,
       },
     });
   }
@@ -276,6 +331,7 @@ export default function TTCMap({
   const hasSetInitialStyleRef = useRef(false);
 
   const slowZonesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+  const disruptionsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const routeDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const endpointsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
 
@@ -321,6 +377,55 @@ export default function TTCMap({
     };
   }, []);
 
+  // Fetch live service alerts once on mount and draw active line closures as
+  // a bold red dashed overlay on the affected track segments.
+  useEffect(() => {
+    let cancelled = false;
+
+    getAlerts()
+      .then((data) => {
+        if (cancelled) return;
+
+        const features: GeoJSON.Feature[] = [];
+        for (const alert of data.alerts) {
+          // Planned nightly closures outside their restricted window are
+          // informational only — reserve the red overlay for closures that
+          // are actually in effect right now.
+          if (alert.category !== "closure" || alert.isUpcomingNotice) continue;
+          const fromStation = findStationByName(alert.fromStation);
+          const toStation = findStationByName(alert.toStation);
+          if (!fromStation || !toStation) continue;
+
+          const coordinates = getRouteCoordinates(alert.line, fromStation.id, toStation.id);
+          if (coordinates.length < 2) continue;
+
+          features.push({
+            type: "Feature",
+            geometry: { type: "LineString", coordinates },
+            properties: {
+              alertId: alert.id,
+              headline: alert.headline,
+              description: alert.description,
+            },
+          });
+        }
+
+        const geojson: GeoJSON.FeatureCollection = { type: "FeatureCollection", features };
+        disruptionsDataRef.current = geojson;
+        (mapRef.current?.getSource(DISRUPTIONS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(
+          geojson
+        );
+      })
+      .catch(() => {
+        // Same as slow zones — a failed fetch just leaves the map without
+        // the disruption overlay rather than breaking the page.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -345,12 +450,14 @@ export default function TTCMap({
     const handleDeparture = onSelectDeparture ?? ((name: string) => console.log("Set as departure:", name));
 
     let interactionsBound = false;
+    let disruptionHoverPopup: maplibregl.Popup | null = null;
 
     // "style.load" (unlike "load") fires again every time setStyle() swaps
     // the basemap, which is exactly when our custom layers need re-adding.
     map.on("style.load", () => {
       addBaseLineLayer(map);
       addSlowZoneLayer(map, slowZonesDataRef.current);
+      addDisruptionLayers(map, disruptionsDataRef.current);
       addRouteHighlightLayers(map, routeDataRef.current);
       addStationsLayer(map);
       addEndpointHighlightLayers(map, endpointsDataRef.current);
@@ -377,6 +484,44 @@ export default function TTCMap({
         new maplibregl.Popup({ offset: 12 })
           .setLngLat(feature.geometry.coordinates as [number, number])
           .setDOMContent(buildPopupContent({ name: properties.name, lines }, handleDeparture))
+          .addTo(map);
+      });
+
+      // Hovering an alert segment shows a tooltip that follows the cursor;
+      // clicking pins a closable one (for touch devices without hover).
+      map.on("mouseenter", DISRUPTIONS_LAYER_ID, () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", DISRUPTIONS_LAYER_ID, () => {
+        map.getCanvas().style.cursor = "";
+        disruptionHoverPopup?.remove();
+        disruptionHoverPopup = null;
+      });
+      map.on("mousemove", DISRUPTIONS_LAYER_ID, (event) => {
+        const feature = event.features?.[0];
+        if (!feature || feature.geometry.type !== "LineString") return;
+        const properties = feature.properties as { headline: string; description: string };
+
+        if (!disruptionHoverPopup) {
+          disruptionHoverPopup = new maplibregl.Popup({
+            closeButton: false,
+            closeOnClick: false,
+            offset: 8,
+          });
+        }
+        disruptionHoverPopup
+          .setLngLat(event.lngLat)
+          .setDOMContent(buildDisruptionTooltipContent(properties))
+          .addTo(map);
+      });
+      map.on("click", DISRUPTIONS_LAYER_ID, (event) => {
+        const feature = event.features?.[0];
+        if (!feature || feature.geometry.type !== "LineString") return;
+        const properties = feature.properties as { headline: string; description: string };
+
+        new maplibregl.Popup({ offset: 8 })
+          .setLngLat(event.lngLat)
+          .setDOMContent(buildDisruptionTooltipContent(properties))
           .addTo(map);
       });
     });

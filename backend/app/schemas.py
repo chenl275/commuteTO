@@ -42,6 +42,32 @@ class SlowZonesResponse(BaseModel):
     source: str
 
 
+class ServiceAlert(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    line: int
+    category: str  # "closure" | "delay" | "maintenance"
+    headline: str
+    description: str
+    direction: str
+    from_station: str = Field(alias="fromStation")
+    to_station: str = Field(alias="toStation")
+    affected_station_ids: list[str] = Field(alias="affectedStationIds")
+    shuttle_service: bool = Field(alias="shuttleService")
+    posted_at: Optional[str] = Field(default=None, alias="postedAt")
+    active_until: Optional[str] = Field(default=None, alias="activeUntil")
+    is_upcoming_notice: bool = Field(default=False, alias="isUpcomingNotice")
+
+
+class AlertsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    alerts: list[ServiceAlert]
+    last_updated: Optional[str] = Field(default=None, alias="lastUpdated")
+    source: str
+
+
 class TransitCommuteResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -51,8 +77,12 @@ class TransitCommuteResponse(BaseModel):
     station_hops: int = Field(alias="stationHops")
     scheduled_duration_minutes: float = Field(alias="scheduledDurationMinutes")
     slow_zone_delay_minutes: float = Field(alias="slowZoneDelayMinutes")
+    slow_zone_delay_seconds: float = Field(alias="slowZoneDelaySeconds")
+    alert_delay_minutes: float = Field(alias="alertDelayMinutes")
     total_duration_minutes: float = Field(alias="totalDurationMinutes")
     active_slow_zones: list[ActiveSlowZone] = Field(alias="activeSlowZones")
+    is_disrupted: bool = Field(alias="isDisrupted")
+    active_alerts_on_route: list[ServiceAlert] = Field(alias="activeAlertsOnRoute")
     departure_time: str = Field(alias="departureTime")
     arrival_time: str = Field(alias="arrivalTime")
     source: str

@@ -4,7 +4,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import SlowZonesResponse, TransitCommuteRequest, TransitCommuteResponse
+from .schemas import AlertsResponse, SlowZonesResponse, TransitCommuteRequest, TransitCommuteResponse
+from .services.alerts_service import get_alerts
 from .services.slow_zones_scraper import get_slow_zones
 from .traffic_service import TransitCommuteError, get_transit_commute_estimate
 
@@ -29,6 +30,11 @@ def root() -> dict[str, str]:
 @app.get("/transit/slow-zones", response_model=SlowZonesResponse)
 async def slow_zones() -> SlowZonesResponse:
     return SlowZonesResponse(**await get_slow_zones())
+
+
+@app.get("/transit/alerts", response_model=AlertsResponse)
+async def alerts() -> AlertsResponse:
+    return AlertsResponse(**await get_alerts())
 
 
 @app.post("/traffic", response_model=TransitCommuteResponse)

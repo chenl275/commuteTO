@@ -1,6 +1,7 @@
 import { BACKEND_URL } from "./constants";
 import type {
   ActiveSlowZone,
+  AlertsResponse,
   SlowZonesResponse,
   TransitCommuteRequest,
   TransitCommuteResponse,
@@ -48,4 +49,14 @@ export async function getSlowZones(): Promise<SlowZonesResponse> {
   }
 
   return response.json() as Promise<SlowZonesResponse>;
+}
+
+export async function getAlerts(): Promise<AlertsResponse> {
+  const response = await fetch(`${BACKEND_URL}/transit/alerts`);
+
+  if (!response.ok) {
+    throw new Error(`Alerts request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<AlertsResponse>;
 }

@@ -1,26 +1,70 @@
 import { formatStationLabel } from "@/lib/stationDisplay";
-import type { TransitCommuteResponse } from "@/types/traffic";
+import type { AlertCategory, ServiceAlert, TransitCommuteResponse } from "@/types/traffic";
 
 interface CommuteResultCardProps {
   result: TransitCommuteResponse;
   className?: string;
 }
 
-type DelaySeverity = "none" | "low" | "moderate" | "severe";
+const SLOW_ZONE_BADGE_STYLES = {
+  none: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  delay: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
+} as const;
 
-function getDelaySeverity(minutes: number): DelaySeverity {
-  if (minutes < 0.5) return "none";
-  if (minutes < 3) return "low";
-  if (minutes < 8) return "moderate";
-  return "severe";
+/** "No Slow Zone Delay" only when there's truly nothing to report — any
+ * nonzero delay (even a few seconds) gets a precise "+X secs"/"+X mins" badge. */
+function formatSlowZoneDelay(
+  zoneCount: number,
+  delaySeconds: number
+): { label: string; hasDelay: boolean } {
+  if (zoneCount === 0 || delaySeconds <= 0) {
+    return { label: "No Slow Zone Delay", hasDelay: false };
+  }
+  if (delaySeconds < 60) {
+    const secs = Math.round(delaySeconds);
+    return { label: `+${secs} sec${secs === 1 ? "" : "s"} Slow Zone Delay`, hasDelay: true };
+  }
+  const mins = Math.round(delaySeconds / 60);
+  return { label: `+${mins} min${mins === 1 ? "" : "s"} Slow Zone Delay`, hasDelay: true };
 }
 
-const DELAY_BADGE_STYLES: Record<DelaySeverity, string> = {
-  none: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
-  low: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
-  moderate: "bg-orange-100 text-orange-800 dark:bg-orange-500/15 dark:text-orange-300",
-  severe: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+// Upcoming (not-yet-active) notices sort last regardless of category; among
+// active alerts, closures sort first (most severe/impassable), then active
+// incidents, then informational maintenance notices.
+const ALERT_SEVERITY_ORDER: Record<AlertCategory, number> = { closure: 0, delay: 1, maintenance: 2 };
+
+const ALERT_BANNER_STYLES: Record<AlertCategory, string> = {
+  closure:
+    "border-red-300 bg-red-50 text-red-900 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100",
+  delay:
+    "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/15 dark:text-amber-100",
+  maintenance:
+    "border-amber-200 bg-amber-50/70 text-amber-800 dark:border-amber-400/15 dark:bg-amber-500/10 dark:text-amber-200/90",
 };
+
+const UPCOMING_NOTICE_BANNER_STYLE =
+  "border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-400/20 dark:bg-sky-500/10 dark:text-sky-100";
+
+const ALERT_LABELS: Record<AlertCategory, string> = {
+  closure: "⚠️ Service Disruption",
+  delay: "⚠️ Delay Alert",
+  maintenance: "ℹ️ Maintenance",
+};
+
+function getAlertBannerStyle(alert: ServiceAlert): string {
+  return alert.isUpcomingNotice ? UPCOMING_NOTICE_BANNER_STYLE : ALERT_BANNER_STYLES[alert.category];
+}
+
+function getAlertLabel(alert: ServiceAlert): string {
+  return alert.isUpcomingNotice ? "ℹ️ Upcoming" : ALERT_LABELS[alert.category];
+}
+
+function sortAlertsBySeverity(alerts: ServiceAlert[]): ServiceAlert[] {
+  return [...alerts].sort((a, b) => {
+    if (a.isUpcomingNotice !== b.isUpcomingNotice) return a.isUpcomingNotice ? 1 : -1;
+    return ALERT_SEVERITY_ORDER[a.category] - ALERT_SEVERITY_ORDER[b.category];
+  });
+}
 
 function formatMinutes(minutes: number): string {
   const rounded = Math.round(minutes);
@@ -34,13 +78,25 @@ function formatClockTime(iso: string): string {
 }
 
 export default function CommuteResultCard({ result, className = "" }: CommuteResultCardProps) {
-  const severity = getDelaySeverity(result.slowZoneDelayMinutes);
-  const hasDelay = severity !== "none";
+  const slowZoneDelay = formatSlowZoneDelay(result.activeSlowZones.length, result.slowZoneDelaySeconds);
 
   return (
     <div
       className={`rounded-2xl border border-neutral-200 bg-neutral-50 p-4 dark:border-white/10 dark:bg-white/5 ${className}`}
     >
+      {result.activeAlertsOnRoute.length > 0 && (
+        <div className="mb-3 flex flex-col gap-2">
+          {sortAlertsBySeverity(result.activeAlertsOnRoute).map((alert) => (
+            <div
+              key={alert.id}
+              className={`rounded-xl border px-3 py-2 text-xs font-medium ${getAlertBannerStyle(alert)}`}
+            >
+              <span className="font-bold">{getAlertLabel(alert)}:</span> {alert.headline}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-white/50">
@@ -64,15 +120,26 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
         Line {result.line} · {result.stationHops} stop{result.stationHops === 1 ? "" : "s"}
       </p>
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <span
-          className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${DELAY_BADGE_STYLES[severity]}`}
+          className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
+            SLOW_ZONE_BADGE_STYLES[slowZoneDelay.hasDelay ? "delay" : "none"]
+          }`}
         >
-          {hasDelay
-            ? `+${formatMinutes(result.slowZoneDelayMinutes)} Slow Zone Delay`
-            : "No Slow Zone Delay"}
+          {slowZoneDelay.label}
         </span>
-        <p className="text-xs text-neutral-500 dark:text-white/50">
+        {result.alertDelayMinutes > 0 && (
+          <span
+            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
+              result.isDisrupted
+                ? "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300"
+                : "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
+            }`}
+          >
+            +{formatMinutes(result.alertDelayMinutes)} Service Alert Delay
+          </span>
+        )}
+        <p className="ml-auto text-xs text-neutral-500 dark:text-white/50">
           Arriving around{" "}
           <span className="font-semibold text-neutral-800 dark:text-white">
             {formatClockTime(result.arrivalTime)}
@@ -94,9 +161,8 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
                 className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200"
               >
                 <p className="font-semibold">
-                  Line {zone.line} {zone.direction}: {zone.normalSpeedKmh} → {zone.reducedSpeedKmh}{" "}
-                  km/h between {formatStationLabel(zone.fromStation)} and{" "}
-                  {formatStationLabel(zone.toStation)}
+                  Line {zone.line} {zone.direction}: Reduced to {zone.reducedSpeedKmh} km/h between{" "}
+                  {formatStationLabel(zone.fromStation)} and {formatStationLabel(zone.toStation)}
                 </p>
                 <p className="mt-0.5 text-amber-800/80 dark:text-amber-200/70">{zone.reason}</p>
               </li>
