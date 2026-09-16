@@ -26,6 +26,14 @@ export default function Button({
 }: ButtonProps) {
   return (
     <button
+      // Browser extensions (password managers, form-fillers) commonly inject
+      // attributes like `fdprocessedid` onto buttons after the server HTML
+      // is generated but before React hydrates, which trips a false-positive
+      // hydration warning here even though nothing in this component itself
+      // is non-deterministic (no window/localStorage reads, no client-only
+      // state) — confirmed via the sole call site (CommuteForm's submit
+      // button), which only passes plain, SSR-stable props.
+      suppressHydrationWarning
       className={`${baseStyles} ${variantStyles[variant]} px-5 py-3 text-sm sm:text-base ${className}`}
       {...props}
     >

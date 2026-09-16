@@ -98,6 +98,15 @@ LINE_2_STATION_IDS = [
 
 LINE_STATION_IDS: dict[int, list[str]] = {1: LINE_1_STATION_IDS, 2: LINE_2_STATION_IDS}
 
+# The Blue Night bus route that shadows each subway line's corridor above
+# ground, used when the subway itself isn't running (TTC subway operates
+# roughly 6am-1:30am; overnight riders on these corridors transfer to the
+# matching night bus instead).
+NIGHT_NETWORK_ROUTE_BY_LINE: dict[int, tuple[str, str]] = {
+    1: ("320", "Yonge"),
+    2: ("300", "Bloor-Danforth"),
+}
+
 
 _TRAILING_STATION_PATTERN = re.compile(r"\s+stations?$", re.IGNORECASE)
 
@@ -125,6 +134,31 @@ _STATIONS_BY_ID: dict[str, dict] = {station["id"]: station for station in _STATI
 _NAME_KEY_TO_ID: dict[str, str] = {
     _normalize_key(station["name"]): station["id"] for station in _STATIONS
 }
+
+# Streetcar/night-bus stops within interchange distance of a subway station
+# (see scripts/ingest_surface_gtfs.py), indexed by that station's id.
+_SURFACE_STOPS_PATH = Path(__file__).resolve().parents[1] / "data" / "surface_stops.json"
+
+
+def _load_surface_stops() -> list[dict]:
+    try:
+        raw = json.loads(_SURFACE_STOPS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return raw if isinstance(raw, list) else []
+
+
+_SURFACE_STOPS: list[dict] = _load_surface_stops()
+_SURFACE_STOPS_BY_STATION_ID: dict[str, list[dict]] = {}
+for _stop in _SURFACE_STOPS:
+    _station_id = _stop.get("interchangeStationId")
+    if _station_id:
+        _SURFACE_STOPS_BY_STATION_ID.setdefault(_station_id, []).append(_stop)
+
+
+def get_surface_interchange_stops(station_id: str) -> list[dict]:
+    """Streetcar/night-bus stops within walking distance of `station_id`."""
+    return _SURFACE_STOPS_BY_STATION_ID.get(station_id, [])
 
 
 def normalize_station_name(raw_name: str) -> str:

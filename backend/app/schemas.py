@@ -58,6 +58,7 @@ class ServiceAlert(BaseModel):
     posted_at: Optional[str] = Field(default=None, alias="postedAt")
     active_until: Optional[str] = Field(default=None, alias="activeUntil")
     is_upcoming_notice: bool = Field(default=False, alias="isUpcomingNotice")
+    is_advisory: bool = Field(default=False, alias="isAdvisory")
 
 
 class AlertsResponse(BaseModel):
@@ -66,6 +67,14 @@ class AlertsResponse(BaseModel):
     alerts: list[ServiceAlert]
     last_updated: Optional[str] = Field(default=None, alias="lastUpdated")
     source: str
+
+
+class CommuteStep(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: str  # "subway" | "streetcar" | "bus"
+    route_number: str = Field(alias="routeNumber")
+    stop_count: int = Field(alias="stopCount")
 
 
 class TransitCommuteResponse(BaseModel):
@@ -78,11 +87,13 @@ class TransitCommuteResponse(BaseModel):
     scheduled_duration_minutes: float = Field(alias="scheduledDurationMinutes")
     slow_zone_delay_minutes: float = Field(alias="slowZoneDelayMinutes")
     slow_zone_delay_seconds: float = Field(alias="slowZoneDelaySeconds")
+    telemetry_source: str = Field(alias="telemetrySource")  # "gtfs_realtime" | "kinematic_model"
     alert_delay_minutes: float = Field(alias="alertDelayMinutes")
     total_duration_minutes: float = Field(alias="totalDurationMinutes")
     active_slow_zones: list[ActiveSlowZone] = Field(alias="activeSlowZones")
     is_disrupted: bool = Field(alias="isDisrupted")
     active_alerts_on_route: list[ServiceAlert] = Field(alias="activeAlertsOnRoute")
+    steps: list[CommuteStep] = Field(default_factory=list)
     departure_time: str = Field(alias="departureTime")
     arrival_time: str = Field(alias="arrivalTime")
     source: str

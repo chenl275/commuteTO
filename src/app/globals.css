@@ -31,3 +31,12 @@ html {
     animation: none;
   }
 }
+
+/* MapLibre's default nav-control buttons (zoom/compass) are 29px square —
+   too small a touch target, with icons that read as barely-visible hairlines
+   at normal display scale. The icons are inline SVGs sized at width/height:
+   100% of the button, so enlarging the button scales them up too. */
+.maplibregl-ctrl-group button {
+  width: 36px !important;
+  height: 36px !important;
+}

@@ -7,6 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from .schemas import AlertsResponse, SlowZonesResponse, TransitCommuteRequest, TransitCommuteResponse
 from .services.alerts_service import get_alerts
 from .services.slow_zones_scraper import get_slow_zones
+from .services.surface_transit import (
+    get_night_buses_geojson,
+    get_streetcars_geojson,
+    get_surface_stops_geojson,
+)
 from .traffic_service import TransitCommuteError, get_transit_commute_estimate
 
 # Load backend/.env regardless of the working directory uvicorn was started from.
@@ -35,6 +40,21 @@ async def slow_zones() -> SlowZonesResponse:
 @app.get("/transit/alerts", response_model=AlertsResponse)
 async def alerts() -> AlertsResponse:
     return AlertsResponse(**await get_alerts())
+
+
+@app.get("/transit/surface/streetcars")
+def surface_streetcars() -> dict:
+    return get_streetcars_geojson()
+
+
+@app.get("/transit/surface/night-buses")
+def surface_night_buses() -> dict:
+    return get_night_buses_geojson()
+
+
+@app.get("/transit/surface/stops")
+def surface_stops() -> dict:
+    return get_surface_stops_geojson()
 
 
 @app.post("/traffic", response_model=TransitCommuteResponse)

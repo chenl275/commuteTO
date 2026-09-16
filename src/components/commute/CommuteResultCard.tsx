@@ -6,26 +6,26 @@ interface CommuteResultCardProps {
   className?: string;
 }
 
-const SLOW_ZONE_BADGE_STYLES = {
+const DELAY_BADGE_STYLES = {
   none: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
   delay: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
 } as const;
 
-/** "No Slow Zone Delay" only when there's truly nothing to report — any
- * nonzero delay (even a few seconds) gets a precise "+X secs"/"+X mins" badge. */
-function formatSlowZoneDelay(
-  zoneCount: number,
-  delaySeconds: number
-): { label: string; hasDelay: boolean } {
-  if (zoneCount === 0 || delaySeconds <= 0) {
-    return { label: "No Slow Zone Delay", hasDelay: false };
+/** "No Track Slowdown" only when there's truly nothing to report — any
+ * nonzero delay (even a few seconds), whether observed live or
+ * kinematically modeled, gets a precise "+X secs"/"+X mins" badge instead
+ * of being rounded away. Labeled "Track Slowdown" (not just "Delay") so
+ * it reads as distinct from the separate "Service Alert Delay" badge below. */
+function formatDelayBadge(delaySeconds: number): { label: string; hasDelay: boolean } {
+  if (delaySeconds <= 0) {
+    return { label: "No Track Slowdown", hasDelay: false };
   }
   if (delaySeconds < 60) {
     const secs = Math.round(delaySeconds);
-    return { label: `+${secs} sec${secs === 1 ? "" : "s"} Slow Zone Delay`, hasDelay: true };
+    return { label: `+${secs} sec${secs === 1 ? "" : "s"} Track Slowdown`, hasDelay: true };
   }
   const mins = Math.round(delaySeconds / 60);
-  return { label: `+${mins} min${mins === 1 ? "" : "s"} Slow Zone Delay`, hasDelay: true };
+  return { label: `+${mins} min${mins === 1 ? "" : "s"} Track Slowdown`, hasDelay: true };
 }
 
 // Upcoming (not-yet-active) notices sort last regardless of category; among
@@ -78,7 +78,8 @@ function formatClockTime(iso: string): string {
 }
 
 export default function CommuteResultCard({ result, className = "" }: CommuteResultCardProps) {
-  const slowZoneDelay = formatSlowZoneDelay(result.activeSlowZones.length, result.slowZoneDelaySeconds);
+  const delayBadge = formatDelayBadge(result.slowZoneDelaySeconds);
+  const isLiveTelemetry = result.telemetrySource === "gtfs_realtime";
 
   return (
     <div
@@ -123,11 +124,20 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <span
           className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
-            SLOW_ZONE_BADGE_STYLES[slowZoneDelay.hasDelay ? "delay" : "none"]
+            DELAY_BADGE_STYLES[delayBadge.hasDelay ? "delay" : "none"]
           }`}
         >
-          {slowZoneDelay.label}
+          {delayBadge.label}
         </span>
+        {isLiveTelemetry && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+            title="This delay is from live train transponder data, not a modeled estimate."
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            Live Telemetry
+          </span>
+        )}
         {result.alertDelayMinutes > 0 && (
           <span
             className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
@@ -141,7 +151,15 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
         )}
         <p className="ml-auto text-xs text-neutral-500 dark:text-white/50">
           Arriving around{" "}
-          <span className="font-semibold text-neutral-800 dark:text-white">
+          {/* toLocaleTimeString formats in the viewer's local timezone, which
+              can differ from wherever this was rendered — this card only ever
+              mounts after a client-side fetch response (never during the
+              initial SSR/hydration pass), but suppress defensively in case
+              that ever changes (e.g. a future server-prefetched result). */}
+          <span
+            className="font-semibold text-neutral-800 dark:text-white"
+            suppressHydrationWarning
+          >
             {formatClockTime(result.arrivalTime)}
           </span>
         </p>

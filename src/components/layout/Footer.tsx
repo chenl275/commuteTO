@@ -5,8 +5,13 @@ export default function Footer() {
     <footer className="border-t border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
       <div className="mx-auto max-w-6xl px-4 py-8 text-sm text-neutral-500 sm:px-6 dark:text-neutral-400">
         <p>
-          &copy; {new Date().getFullYear()} {SITE_NAME}. Not affiliated with
-          the Toronto Transit Commission (TTC).
+          {/* This page is prerendered at build time, so the year embedded in
+              that static HTML can lag behind the visitor's actual clock
+              (e.g. built in December, viewed after New Year's) — suppress
+              the resulting mismatch rather than forcing a client-only render
+              for one digit. */}
+          &copy; <span suppressHydrationWarning>{new Date().getFullYear()}</span> {SITE_NAME}. Not
+          affiliated with the Toronto Transit Commission (TTC).
         </p>
         <p className="mt-1">
           Live routing and real-time transit data are coming soon.

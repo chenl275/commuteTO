@@ -3,6 +3,8 @@ import type {
   ActiveSlowZone,
   AlertsResponse,
   SlowZonesResponse,
+  SurfaceRoutesGeoJSON,
+  SurfaceStopsGeoJSON,
   TransitCommuteRequest,
   TransitCommuteResponse,
 } from "@/types/traffic";
@@ -59,4 +61,34 @@ export async function getAlerts(): Promise<AlertsResponse> {
   }
 
   return response.json() as Promise<AlertsResponse>;
+}
+
+export async function getStreetcars(): Promise<SurfaceRoutesGeoJSON> {
+  const response = await fetch(`${BACKEND_URL}/transit/surface/streetcars`);
+
+  if (!response.ok) {
+    throw new Error(`Streetcars request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<SurfaceRoutesGeoJSON>;
+}
+
+export async function getNightBuses(): Promise<SurfaceRoutesGeoJSON> {
+  const response = await fetch(`${BACKEND_URL}/transit/surface/night-buses`);
+
+  if (!response.ok) {
+    throw new Error(`Night buses request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<SurfaceRoutesGeoJSON>;
+}
+
+export async function getSurfaceStops(): Promise<SurfaceStopsGeoJSON> {
+  const response = await fetch(`${BACKEND_URL}/transit/surface/stops`);
+
+  if (!response.ok) {
+    throw new Error(`Surface stops request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<SurfaceStopsGeoJSON>;
 }

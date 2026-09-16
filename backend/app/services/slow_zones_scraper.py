@@ -17,6 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from . import stations
+from .kinematics import estimate_slow_zone_delay_seconds
 
 TTC_RSZ_URL = "https://www.ttc.ca/riding-the-ttc/Updates/Reduced-Speed-Zones"
 CACHE_TTL_SECONDS = 60 * 60  # 1 hour
@@ -46,11 +47,9 @@ class SlowZone:
 
     def delay_seconds(self) -> float:
         """Extra time (seconds) added by crawling the defect at reduced speed
-        instead of the normal operating speed."""
-        if self.reduced_speed_kmh <= 0 or self.normal_speed_kmh <= 0:
-            return 0.0
-        return self.defect_length_meters * (
-            (3.6 / self.reduced_speed_kmh) - (3.6 / self.normal_speed_kmh)
+        instead of the normal operating speed — see kinematics.py."""
+        return estimate_slow_zone_delay_seconds(
+            self.defect_length_meters, self.reduced_speed_kmh, self.normal_speed_kmh
         )
 
     def to_dict(self) -> dict:

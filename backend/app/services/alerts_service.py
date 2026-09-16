@@ -44,6 +44,24 @@ _DELAY_CAUSES = {
 }
 _MAINTENANCE_CAUSES = {"MAINTENANCE", "CONSTRUCTION"}
 
+_SERVICE_RESUMED_PATTERN = re.compile(r"regular service has resumed", re.IGNORECASE)
+# An alert whose affected stations cover this much of the line end-to-end
+# reads as a general line-wide status update ("delays between Vaughan and
+# Finch"), not a pinpointed incident — even when TTC files it as "Delays".
+_LINE_WIDE_COVERAGE_THRESHOLD = 0.7
+
+
+def _is_line_wide_advisory(description: str, line: int, affected_station_ids: list[str]) -> bool:
+    """True for broad terminus-to-terminus status updates rather than a
+    specific, localized incident or hold — these shouldn't be penalized
+    like a pinpointed delay (see traffic_service.py)."""
+    if _SERVICE_RESUMED_PATTERN.search(description):
+        return True
+    total_stations = len(stations.LINE_STATION_IDS.get(line, []))
+    if total_stations == 0:
+        return False
+    return len(affected_station_ids) / total_stations >= _LINE_WIDE_COVERAGE_THRESHOLD
+
 _NIGHTLY_KEYWORD_PATTERN = re.compile(r"\bnightly\b", re.IGNORECASE)
 _CLOCK_TIME_PATTERN = re.compile(r"\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?", re.IGNORECASE)
 _CLOCK_TIME_TOKEN_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([ap])", re.IGNORECASE)
@@ -157,6 +175,7 @@ class ServiceAlert:
     posted_at: Optional[str]
     active_until: Optional[str]
     is_upcoming_notice: bool = False
+    is_advisory: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +192,7 @@ class ServiceAlert:
             "postedAt": self.posted_at,
             "activeUntil": self.active_until,
             "isUpcomingNotice": self.is_upcoming_notice,
+            "isAdvisory": self.is_advisory,
         }
 
 
@@ -208,6 +228,7 @@ def _parse_alert(raw: dict) -> Optional[ServiceAlert]:
 
     description = header_text or effect_desc
     headline = build_headline(category, from_station, to_station, shuttle_service)
+    is_advisory = _is_line_wide_advisory(description, line, affected_station_ids)
 
     # For the generic feed (no specific trip in mind), judge a closure's
     # nightly window against the current moment — traffic_service.py
@@ -233,6 +254,7 @@ def _parse_alert(raw: dict) -> Optional[ServiceAlert]:
         posted_at=active_period.get("start"),
         active_until=active_until,
         is_upcoming_notice=is_upcoming_notice,
+        is_advisory=is_advisory,
     )
 
 
