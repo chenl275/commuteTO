@@ -11,7 +11,7 @@
     "dev:all": "concurrently -k \"npm run dev\" \"cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 8000\""
   },
   "dependencies": {
-    "maplibre-gl": "^6.9.1",
+    "maplibre-gl": "^6.10.0",
     "next": "16.3.5",
     "react": "19.2.8",
     "react-dom": "19.2.8"
