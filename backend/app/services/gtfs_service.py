@@ -1,27 +1,27 @@
-"""Live GTFS-Realtime TripUpdates ingestion for TTC subway Lines 1, 2, 4.
+"""Live GTFS-Realtime subway TripUpdates ingestion, for TTC Lines 1, 2, 4.
 
-Provides real-time, per-station observed delay (seconds) as reported by
-train transponders — used as empirical ground truth ahead of the kinematic
-slow-zone delay estimate (kinematics.py) whenever it's available.
+Per-station observed delay (seconds) is derived from subway TripUpdates —
+used as empirical ground truth ahead of the kinematic slow-zone delay
+estimate (kinematics.py) whenever it's available.
 
-The feed at the URL commonly cited for this
+The URL commonly cited for this
 (https://opendata.toronto.ca/transportation/gtfs-realtime/trip-updates.pb)
 doesn't actually resolve to protobuf data — it 200s with the toronto.ca
 website's HTML shell. The real feed, found via TTC's own GTFS-RT landing
-page (https://gtfsrt.ttc.ca), is a dedicated subway-only TripUpdates
-endpoint with `route_id` set to "1"/"2"/"4" (confirmed against a live pull).
+page (https://gtfsrt.ttc.ca), is:
+  - https://gtfsrt.ttc.ca/trips/subway?format=binary — subway-only
+    TripUpdates, `route_id` "1"/"2"/"4" (confirmed against a live pull).
 
-A caveat verified against that live feed: TTC's subway StopTimeUpdates only
-ever populate `arrival.time` (an absolute predicted Unix timestamp), never
+Caveat verified against the live subway feed: StopTimeUpdates only ever
+populate `arrival.time` (an absolute predicted Unix timestamp), never
 `arrival.delay`/`departure.delay` — and the feed's trip ids come from TTC's
 internal CAD/AVL system, not the trip ids in their published static GTFS, so
 there's no published crosswalk to derive "vs. scheduled" delay by joining
 the two. `_parse_feed` still checks `.delay` first per GTFS-RT spec (so this
-starts working automatically if TTC ever populates it), but in today's feed
-it will consistently find nothing and every route falls back to the
-kinematic model — which is the correct, intended behavior here, not a bug:
-this module is honest about only surfacing delay it can actually observe,
-rather than fabricating one.
+starts working automatically if TTC ever populates it), but today it will
+consistently find nothing and every route falls back to the kinematic model
+— the correct, intended behavior, not a bug: honest about only surfacing
+delay actually observed, not a fabricated one.
 """
 
 from __future__ import annotations
@@ -58,6 +58,14 @@ def _load_stop_mapping() -> dict[str, str]:
 
 
 _GTFS_STOP_TO_STATION_ID: dict[str, str] = _load_stop_mapping()
+
+
+def get_station_id_for_stop(stop_id: str) -> Optional[str]:
+    """Our station id for a GTFS-RT `stop_id` (e.g. "13857" -> "st-george"),
+    or None if it's not a mapped subway stop — used to translate a GTFS-RT
+    alert's `informed_entity.stop_id` list into station-range checks
+    (see detour_service.py)."""
+    return _GTFS_STOP_TO_STATION_ID.get(stop_id)
 
 
 def _parse_feed(payload: bytes) -> dict[str, int]:

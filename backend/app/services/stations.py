@@ -182,6 +182,36 @@ def find_station_id(raw_name: str) -> Optional[str]:
     return station["id"] if station else None
 
 
+def station_name(station_id: str) -> Optional[str]:
+    station = _STATIONS_BY_ID.get(station_id)
+    return station["name"] if station else None
+
+
+def station_coordinates(station_id: str) -> Optional[Tuple[float, float]]:
+    """[lon, lat] for `station_id`, or None if unknown."""
+    station = _STATIONS_BY_ID.get(station_id)
+    if not station:
+        return None
+    lon, lat = station["coordinates"]
+    return (lon, lat)
+
+
+def interpolate_between(from_id: str, to_id: str, progress: float) -> Optional[Tuple[float, float]]:
+    """A point `progress` (0-1) of the way from station `from_id` to `to_id`,
+    along the straight line between their coordinates — the same
+    simplification used to draw subway lines on the map (no curved track
+    shape data is modeled), so a live train position lands on the same
+    geometry riders actually see."""
+    from_coords = station_coordinates(from_id)
+    to_coords = station_coordinates(to_id)
+    if from_coords is None or to_coords is None:
+        return None
+    progress = max(0.0, min(1.0, progress))
+    from_lon, from_lat = from_coords
+    to_lon, to_lat = to_coords
+    return (from_lon + (to_lon - from_lon) * progress, from_lat + (to_lat - from_lat) * progress)
+
+
 def _haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     lat1, lon1 = a
     lat2, lon2 = b

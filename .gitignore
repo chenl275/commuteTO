@@ -37,6 +37,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# GTFS static feed: raw download (~250MB, see backend/scripts/build_gtfs_routing_index.py)
+# and the indexed SQLite routing DB generated from it — both regenerable, not source.
+/backend/data/gtfs/
+/backend/app/data/gtfs_routing.db
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

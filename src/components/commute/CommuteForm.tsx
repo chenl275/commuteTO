@@ -16,18 +16,45 @@ import {
 } from "@/components/icons";
 import { getTrafficEstimate } from "@/lib/traffic";
 import { getStationByNameOrId } from "@/lib/geo/subwayGeoJSON";
-import type { DepartureMode } from "@/lib/types";
+import { searchAddresses } from "@/lib/geocoding";
+import type { DepartureMode, LatLon, LocationSelection } from "@/lib/types";
 import type { TransitCommuteResponse } from "@/types/traffic";
 
+interface ResolvedEndpoint {
+  text: string;
+  coords: LatLon | null;
+}
+
 /**
- * Resolves free-typed rider input to the station registry's bare canonical
- * name ("Union", "Bloor-Yonge") before it's sent to the backend. Falls back
- * to the raw trimmed text for anything the registry can't resolve, so the
- * backend's own matching still gets a chance to handle it.
+ * Auto-resolves a free-typed origin/destination that doesn't yet have
+ * coordinates attached — e.g. the rider typed "80 bay street" and hit Enter
+ * or clicked "Calculate Commute" without ever clicking a dropdown
+ * suggestion, so StationAutocompleteField's onSelect never fired. Mirrors
+ * that component's own hybrid lookup: a known station name needs no
+ * coordinates at all, otherwise geocode it the same way the address
+ * dropdown would (see lib/geocoding.ts) and take the top result. Falls back
+ * to the raw text with no coordinates if nothing resolves — the backend
+ * geocodes as a last resort too (see traffic_service.py), so submission is
+ * never blocked here.
  */
-function resolveStationInput(value: string): string {
+async function resolveEndpoint(value: string, coords: LatLon | null): Promise<ResolvedEndpoint> {
+  if (coords) return { text: value.trim(), coords };
+
   const trimmed = value.trim();
-  return getStationByNameOrId(trimmed)?.name ?? trimmed;
+  if (!trimmed) return { text: trimmed, coords: null };
+
+  const station = getStationByNameOrId(trimmed);
+  if (station) return { text: station.name, coords: null };
+
+  try {
+    const [first] = await searchAddresses(trimmed);
+    if (first) return { text: first.title, coords: { lat: first.lat, lon: first.lon } };
+  } catch {
+    // A failed/offline geocode just falls through to the raw text below —
+    // the backend's own geocoding fallback still gets a chance to resolve it.
+  }
+
+  return { text: trimmed, coords: null };
 }
 
 function getTodayISODate(): string {
@@ -44,16 +71,33 @@ function getCurrentTime(): string {
 interface CommuteFormProps {
   from: string;
   destination: string;
+  /** Exact coordinates behind `from`/`destination`, when the rider picked a
+   * geocoded address/station suggestion or dropped a map pin — null once
+   * they've typed something that no longer necessarily matches those
+   * coordinates. Passed straight to the backend so its multi-modal router
+   * can compute the real walk leg from that exact point. */
+  fromCoords: LatLon | null;
+  destinationCoords: LatLon | null;
   onFromChange: (value: string) => void;
   onDestinationChange: (value: string) => void;
+  onFromSelect: (selection: LocationSelection) => void;
+  onDestinationSelect: (selection: LocationSelection) => void;
+  /** Swaps from/destination (text and coordinates together) — owned by the
+   * parent since it holds both pairs of state. */
+  onSwap: () => void;
   onResult?: (result: TransitCommuteResponse | null) => void;
 }
 
 export default function CommuteForm({
   from,
   destination,
+  fromCoords,
+  destinationCoords,
   onFromChange,
   onDestinationChange,
+  onFromSelect,
+  onDestinationSelect,
+  onSwap,
   onResult,
 }: CommuteFormProps) {
   const [departureMode, setDepartureMode] = useState<DepartureMode>("now");
@@ -69,11 +113,6 @@ export default function CommuteForm({
     destination.trim() !== "" &&
     (!isLeavingLater || (date !== "" && time !== ""));
 
-  function handleSwap() {
-    onFromChange(destination);
-    onDestinationChange(from);
-  }
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsCalculating(true);
@@ -82,9 +121,29 @@ export default function CommuteForm({
     onResult?.(null);
 
     try {
+      // Pressing Enter or clicking "Calculate Commute" without ever picking
+      // a dropdown suggestion (e.g. typing "80 bay street" and submitting
+      // straight away) leaves fromCoords/destinationCoords null — resolve
+      // both endpoints the same way the dropdown would before requesting an
+      // estimate, so originLat/originLon/destLat/destLon are always attached.
+      const [resolvedFrom, resolvedDestination] = await Promise.all([
+        resolveEndpoint(from, fromCoords),
+        resolveEndpoint(destination, destinationCoords),
+      ]);
+      if (!fromCoords && resolvedFrom.coords) {
+        onFromSelect({ name: resolvedFrom.text, ...resolvedFrom.coords });
+      }
+      if (!destinationCoords && resolvedDestination.coords) {
+        onDestinationSelect({ name: resolvedDestination.text, ...resolvedDestination.coords });
+      }
+
       const estimate = await getTrafficEstimate({
-        origin: resolveStationInput(from),
-        destination: resolveStationInput(destination),
+        origin: resolvedFrom.text,
+        destination: resolvedDestination.text,
+        originLat: resolvedFrom.coords?.lat,
+        originLon: resolvedFrom.coords?.lon,
+        destLat: resolvedDestination.coords?.lat,
+        destLon: resolvedDestination.coords?.lon,
         departureTime: isLeavingLater ? `${date}T${time}` : undefined,
       });
       setResult(estimate);
@@ -110,14 +169,15 @@ export default function CommuteForm({
           id="from"
           label="From"
           icon={<MapPinIcon className="h-5 w-5" />}
-          placeholder="Departure station"
+          placeholder="Departure station, address, or landmark"
           value={from}
           onChange={onFromChange}
+          onSelect={onFromSelect}
         />
 
         <button
           type="button"
-          onClick={handleSwap}
+          onClick={onSwap}
           aria-label="Swap from and destination"
           className="mx-auto -my-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-neutral-300 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 dark:border-white/20 dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"
         >
@@ -128,9 +188,10 @@ export default function CommuteForm({
           id="destination"
           label="Destination"
           icon={<FlagIcon className="h-5 w-5" />}
-          placeholder="Destination station"
+          placeholder="Destination station, address, or landmark"
           value={destination}
           onChange={onDestinationChange}
+          onSelect={onDestinationSelect}
         />
       </div>
 

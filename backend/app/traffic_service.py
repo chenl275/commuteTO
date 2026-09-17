@@ -1,19 +1,36 @@
 """Subway commute-time modeling: station-hop schedule + live slow zone delay."""
 
+import re
 from datetime import datetime, time as dt_time, timedelta
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, TypeVar, Union
 
-from .schemas import ActiveSlowZone, CommuteStep, ServiceAlert, TransitCommuteRequest, TransitCommuteResponse
-from .services import gtfs_service, stations
+from .schemas import (
+    ActiveSlowZone,
+    CommuteStep,
+    ItineraryLeg,
+    ServiceAlert,
+    TransitCommuteRequest,
+    TransitCommuteResponse,
+)
+from .services import gtfs_service, router, stations
+from .services.geocoding_service import geocode_address
 from .services.alerts_service import (
     build_headline,
-    describe_nightly_window,
+    describe_recognized_window,
     get_alerts,
-    is_within_nightly_window,
+    is_within_recognized_window,
 )
+from .services.detour_service import get_detours_for_routes
 from .services.slow_zones_scraper import get_slow_zones
 
 MINUTES_PER_STATION_HOP = 1.5
+
+# A walk leg this short (meters) right at the start or end of a trip is
+# internal station navigation — entering/exiting the concourse, or shuffling
+# between sibling platforms at an interchange — not a real turn-by-turn
+# street direction a rider needs called out as its own step. Matches the
+# rough scale of "the origin is already at/near a station's concourse."
+MICRO_WALK_SUPPRESSION_METERS = 150.0
 
 # A full closure means a shuttle replaces the subway for that stretch — a
 # flat mid-range estimate of the extra transfer/wait time it costs a rider.
@@ -26,6 +43,44 @@ INCIDENT_HOLD_PENALTY_MINUTES = 10.0
 # penalty as someone caught in an actual localized incident.
 ADVISORY_NOMINAL_PENALTY_MINUTES = 2.0
 ADVISORY_EXEMPT_MAX_HOPS = 2
+# Several simultaneous "delay"-category alerts on the same short route
+# (rare, but the widget feed doesn't dedupe) shouldn't compound into an
+# unrealistic pile-up — this caps the incident/advisory total before the
+# closure penalty (which is already its own separate, larger figure) is
+# added on top.
+MAX_ALERT_DELAY_PENALTY_MINUTES = 20.0
+# A real GTFS-RT alert is commonly broadcast as one FeedEntity per stop id
+# along the affected corridor (and the widget feed can likewise carry more
+# than one dated instance of the same recurring notice) — all with
+# identical rider-facing text, so without deduplication the same message
+# would repeat once per stop/instance.
+
+_DEDUP_PUNCTUATION_PATTERN = re.compile(r"[^\w\s]")
+_DEDUP_WHITESPACE_PATTERN = re.compile(r"\s+")
+
+_T = TypeVar("_T")
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Case-fold and strip whitespace/punctuation so the same underlying
+    alert broadcast with only superficial formatting differences (extra
+    spaces, a trailing period) still collapses to one entry."""
+    lowered = _DEDUP_PUNCTUATION_PATTERN.sub("", text.lower())
+    return _DEDUP_WHITESPACE_PATTERN.sub(" ", lowered).strip()
+
+
+def _dedupe_by_text(items: list[_T], text_of: Callable[[_T], str]) -> list[_T]:
+    """Keeps only the first occurrence of each normalized-text item,
+    preserving order."""
+    seen: set[str] = set()
+    deduped: list[_T] = []
+    for item in items:
+        key = _normalize_for_dedup(text_of(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 # TTC subway runs roughly 6am-1:30am; overnight requests in this window ride
 # the Blue Night network instead (see stations.NIGHT_NETWORK_ROUTE_BY_LINE).
@@ -59,17 +114,50 @@ def _parse_departure_time(departure_time: str | None) -> datetime:
         return datetime.now()
 
 
-def _resolve_station(value: Union[str, Tuple[float, float]]) -> dict:
-    if _is_coordinates(value):
-        station = stations.nearest_station(tuple(value))
+async def _resolve_endpoint(
+    value: Union[str, Tuple[float, float]],
+    lat: Optional[float],
+    lon: Optional[float],
+) -> Tuple[dict, Optional[Tuple[float, float]], str]:
+    """Resolves one origin/destination endpoint to (the nearest/matched
+    subway station used for line-hop + slow-zone modeling, the exact (lat,
+    lon) point when the request supplied real coordinates — a geocoded
+    address or a map-dropped pin, not just a named station — and the
+    rider-facing display name. The display name preserves whatever the rider
+    actually typed/picked (e.g. "214 College St") instead of silently
+    swapping in the snapped nearest station's name.
+
+    No upfront "is this a known station" gate: a plain string that isn't a
+    recognized station name is geocoded server-side (Photon) as a fallback
+    before giving up — the frontend's own debounced geocoder (see
+    StationAutocompleteField.tsx) may not have resolved yet if the rider hit
+    Enter or clicked "Calculate Commute" immediately after typing."""
+    if lat is not None and lon is not None:
+        station = stations.nearest_station((lat, lon))
         if station is None:
             raise TransitCommuteError("No TTC subway station data is available.")
-        return station
+        display_name = value.strip() if isinstance(value, str) and value.strip() else station["name"]
+        return station, (lat, lon), display_name
 
-    station = stations.find_station(value)
-    if station is None:
-        raise TransitCommuteError(f'Unrecognized TTC station: "{value}"')
-    return station
+    if _is_coordinates(value):
+        coordinates = tuple(value)
+        station = stations.nearest_station(coordinates)
+        if station is None:
+            raise TransitCommuteError("No TTC subway station data is available.")
+        return station, coordinates, station["name"]
+
+    matched_station = stations.find_station(value)
+    if matched_station is not None:
+        return matched_station, None, matched_station["name"]
+
+    geocoded = await geocode_address(value)
+    if geocoded is not None:
+        station = stations.nearest_station(geocoded)
+        if station is None:
+            raise TransitCommuteError("No TTC subway station data is available.")
+        return station, geocoded, value.strip()
+
+    raise TransitCommuteError(f'Couldn\'t find a TTC station or address matching "{value}".')
 
 
 def _shared_line(origin: dict, destination: dict) -> int:
@@ -83,7 +171,13 @@ def _shared_line(origin: dict, destination: dict) -> int:
 
 
 def _get_night_network_estimate(
-    origin_station: dict, destination_station: dict, line: int, hops: int, departure: datetime
+    origin_station: dict,
+    destination_station: dict,
+    line: int,
+    hops: int,
+    departure: datetime,
+    origin_display: str,
+    destination_display: str,
 ) -> TransitCommuteResponse:
     """The subway doesn't run 1:30-5:30am — route via the Blue Night bus that
     shadows this line's corridor instead. No slow zones, GTFS telemetry, or
@@ -100,8 +194,8 @@ def _get_night_network_estimate(
     arrival = departure + timedelta(minutes=scheduled_minutes)
 
     return TransitCommuteResponse(
-        origin=origin_station["name"],
-        destination=destination_station["name"],
+        origin=origin_display,
+        destination=destination_display,
         line=line,
         station_hops=hops,
         scheduled_duration_minutes=round(scheduled_minutes, 1),
@@ -120,19 +214,197 @@ def _get_night_network_estimate(
     )
 
 
+def _to_clock_time(base_date, seconds_of_day: float) -> datetime:
+    return datetime.combine(base_date, dt_time()) + timedelta(seconds=seconds_of_day)
+
+
+def _trim_micro_walks(legs: list) -> list:
+    """Drops a leading and/or trailing run of very short walk legs (each
+    under MICRO_WALK_SUPPRESSION_METERS) from the *displayed* step list —
+    the "walk to the platform" bracketing a trip whose origin/destination
+    already sits at/near a station concourse, and any same-station
+    platform-to-platform transfer walk right at the end of the trip. A short
+    walk strictly *between* two transit legs (a real street-level transfer)
+    is left alone — that's still a step the rider needs. Only affects which
+    legs are shown; the caller still uses the untrimmed list for total
+    duration/departure/arrival math, since the rider still spends that time
+    walking even when it's not worth its own instruction. Never trims the
+    whole list to empty (a walk-only trip has nothing else to show)."""
+    start = 0
+    while (
+        start < len(legs) - 1
+        and legs[start].mode == "walk"
+        and (legs[start].distance_meters or 0) <= MICRO_WALK_SUPPRESSION_METERS
+    ):
+        start += 1
+
+    end = len(legs)
+    while (
+        end > start + 1
+        and legs[end - 1].mode == "walk"
+        and (legs[end - 1].distance_meters or 0) <= MICRO_WALK_SUPPRESSION_METERS
+    ):
+        end -= 1
+
+    return legs[start:end]
+
+
+async def _get_multimodal_estimate(
+    origin_station: dict,
+    destination_station: dict,
+    departure: datetime,
+    origin_point: Optional[Tuple[float, float]],
+    destination_point: Optional[Tuple[float, float]],
+    origin_display: str,
+    destination_display: str,
+) -> Optional[TransitCommuteResponse]:
+    """Walk -> transit -> ... -> walk itinerary via router.py's time-dependent
+    Dijkstra over the full GTFS network — the fallback whenever the origin
+    and destination don't share a modeled subway line (see router.py), and
+    always the path taken when the request supplied real coordinates for
+    either endpoint (a geocoded address or a map-dropped pin), since only
+    this path actually models the walk leg from that exact point rather than
+    assuming the rider starts right at a station platform. Uses the request's
+    actual (lat, lon) when it supplied coordinates directly, rather than the
+    resolved station's coordinates, so the initial/final walk legs reflect
+    where the rider actually is."""
+    origin_lat, origin_lon = origin_point if origin_point is not None else tuple(reversed(origin_station["coordinates"]))
+    destination_lat, destination_lon = (
+        destination_point if destination_point is not None else tuple(reversed(destination_station["coordinates"]))
+    )
+
+    itinerary = await router.find_itinerary(
+        origin=(origin_lat, origin_lon),
+        destination=(destination_lat, destination_lon),
+        departure=departure,
+        origin_name=origin_display,
+        destination_name=destination_display,
+    )
+    if itinerary is None or not itinerary.legs:
+        return None
+
+    base_date = departure.date()
+    steps: list[CommuteStep] = []
+    itinerary_legs: list[ItineraryLeg] = []
+    total_stop_count = 0
+    primary_line = 0
+
+    # station_hops/primary_line reflect the real trip, so they're computed
+    # from every leg — trimming only ever drops walk legs (see
+    # _trim_micro_walks), which don't contribute to either anyway. Only the
+    # rider-facing steps/itinerary lists below drop the internal micro-walks.
+    for leg in itinerary.legs:
+        if leg.mode != "walk":
+            total_stop_count += leg.stop_count
+            if leg.mode == "subway" and leg.route_short_name and leg.route_short_name.isdigit():
+                primary_line = int(leg.route_short_name)
+
+    for leg in _trim_micro_walks(itinerary.legs):
+        if leg.mode != "walk":
+            steps.append(CommuteStep(mode=leg.mode, route_number=leg.route_short_name or "", stop_count=leg.stop_count))
+        itinerary_legs.append(
+            ItineraryLeg(
+                mode=leg.mode,
+                route_short_name=leg.route_short_name,
+                route_long_name=leg.route_long_name,
+                direction=leg.direction,
+                from_name=leg.from_name,
+                to_name=leg.to_name,
+                stop_count=leg.stop_count,
+                distance_meters=leg.distance_meters,
+                duration_minutes=round(leg.duration_minutes, 1),
+                departure_time=_to_clock_time(base_date, leg.departure_sec).isoformat(),
+                arrival_time=_to_clock_time(base_date, leg.arrival_sec).isoformat(),
+                path=leg.path,
+            )
+        )
+
+    first_leg, last_leg = itinerary.legs[0], itinerary.legs[-1]
+    total_minutes = (last_leg.arrival_sec - first_leg.departure_sec) / 60.0
+    delay_minutes = itinerary.delay_seconds / 60.0
+    scheduled_minutes = total_minutes - delay_minutes
+
+    return TransitCommuteResponse(
+        origin=origin_display,
+        destination=destination_display,
+        line=primary_line,
+        station_hops=total_stop_count,
+        scheduled_duration_minutes=round(scheduled_minutes, 1),
+        slow_zone_delay_minutes=round(delay_minutes, 1),
+        slow_zone_delay_seconds=round(itinerary.delay_seconds, 1),
+        telemetry_source="kinematic_model",
+        alert_delay_minutes=0.0,
+        total_duration_minutes=round(total_minutes, 1),
+        active_slow_zones=[],
+        is_disrupted=False,
+        active_alerts_on_route=[],
+        steps=steps,
+        itinerary=itinerary_legs,
+        departure_time=_to_clock_time(base_date, first_leg.departure_sec).isoformat(),
+        arrival_time=_to_clock_time(base_date, last_leg.arrival_sec).isoformat(),
+        source="live",
+    )
+
+
 async def get_transit_commute_estimate(request: TransitCommuteRequest) -> TransitCommuteResponse:
     departure = _parse_departure_time(request.departure_time)
 
-    origin_station = _resolve_station(request.origin)
-    destination_station = _resolve_station(request.destination)
-    line = _shared_line(origin_station, destination_station)
+    origin_station, origin_point, origin_display = await _resolve_endpoint(
+        request.origin, request.origin_lat, request.origin_lon
+    )
+    destination_station, destination_point, destination_display = await _resolve_endpoint(
+        request.destination, request.dest_lat, request.dest_lon
+    )
+
+    # A geocoded address or map-dropped pin (real coordinates, not just a
+    # named station) always routes through the multi-modal walk+transit
+    # router, so the walk from that exact point to the nearest usable
+    # stop/station is actually modeled — the subway-only fast path below
+    # assumes the rider starts right at a station platform.
+    if origin_point is not None or destination_point is not None:
+        multimodal = await _get_multimodal_estimate(
+            origin_station,
+            destination_station,
+            departure,
+            origin_point,
+            destination_point,
+            origin_display,
+            destination_display,
+        )
+        if multimodal is not None:
+            return multimodal
+        raise TransitCommuteError(
+            f'No walking + transit route found between "{origin_display}" and "{destination_display}".'
+        )
+
+    try:
+        line = _shared_line(origin_station, destination_station)
+    except TransitCommuteError:
+        # Cross-line (or off-subway-network) trip — the detailed line-hop
+        # model below doesn't apply, but a real multi-modal path might still
+        # exist (e.g. Walk -> Bus -> Subway -> Walk); fall through to the
+        # original error only if the router can't find one either.
+        multimodal = await _get_multimodal_estimate(
+            origin_station,
+            destination_station,
+            departure,
+            origin_point,
+            destination_point,
+            origin_display,
+            destination_display,
+        )
+        if multimodal is not None:
+            return multimodal
+        raise
 
     hops = stations.hops_between(line, origin_station["id"], destination_station["id"])
     if hops is None:
         raise TransitCommuteError("Couldn't find a route between these stations.")
 
     if _is_within_night_network_window(departure):
-        return _get_night_network_estimate(origin_station, destination_station, line, hops, departure)
+        return _get_night_network_estimate(
+            origin_station, destination_station, line, hops, departure, origin_display, destination_display
+        )
 
     scheduled_minutes = hops * MINUTES_PER_STATION_HOP
 
@@ -171,6 +443,9 @@ async def get_transit_commute_estimate(request: TransitCommuteRequest) -> Transi
     alerts_on_route = stations.alerts_along_route(
         line, origin_station["id"], destination_station["id"], alerts["alerts"]
     )
+    alerts_on_route = _dedupe_by_text(
+        alerts_on_route, text_of=lambda a: f"{a.get('headline', '')} {a.get('description', '')}"
+    )
 
     effective_alerts: list[dict] = []
     is_disrupted = False
@@ -178,14 +453,16 @@ async def get_transit_commute_estimate(request: TransitCommuteRequest) -> Transi
     for alert in alerts_on_route:
         alert = dict(alert)
         if alert["category"] == "closure":
-            # A closure that matches a recognized "nightly" pattern only
-            # counts as an active disruption when this request's departure
-            # time actually falls inside that overnight window — otherwise
-            # it's surfaced as an upcoming notice, not a live blocker.
-            within_window = is_within_nightly_window(alert["description"], departure)
+            # A closure that matches a recognized "nightly" or "weekend"
+            # pattern only counts as an active disruption when this
+            # request's departure time actually falls inside that window —
+            # otherwise it's surfaced as an upcoming notice, not a live
+            # blocker (e.g. a Wednesday-afternoon request for a "this
+            # weekend" closure must not eat the full closure penalty).
+            within_window = is_within_recognized_window(alert["description"], departure)
             if within_window is False:
                 alert["isUpcomingNotice"] = True
-                notice_headline = describe_nightly_window(alert["description"])
+                notice_headline = describe_recognized_window(alert["description"])
                 if notice_headline:
                     alert["headline"] = notice_headline
             else:
@@ -214,12 +491,9 @@ async def get_transit_commute_estimate(request: TransitCommuteRequest) -> Transi
     # "maintenance" alerts are informational only here — the extra travel
     # time they cause is already captured by the slow-zone delay above, so
     # adding a separate penalty for them would double-count the same cause.
-    alert_delay_minutes = delay_penalty_minutes
+    alert_delay_minutes = min(delay_penalty_minutes, MAX_ALERT_DELAY_PENALTY_MINUTES)
     if is_disrupted:
         alert_delay_minutes += CLOSURE_SHUTTLE_PENALTY_MINUTES
-
-    total_minutes = scheduled_minutes + slow_zone_delay_minutes + alert_delay_minutes
-    arrival = departure + timedelta(minutes=total_minutes)
 
     steps: list[CommuteStep] = [CommuteStep(mode="subway", route_number=str(line), stop_count=hops)]
     # Surface a real streetcar connection at either endpoint — useful context
@@ -231,9 +505,85 @@ async def get_transit_commute_estimate(request: TransitCommuteRequest) -> Transi
             steps.append(CommuteStep(mode="streetcar", route_number=stop["routes"][0], stop_count=1))
             break
 
+    # GTFS-RT ServiceAlerts detour/construction/shuttle detection — scoped
+    # strictly to the subway line actually being ridden. The streetcar
+    # step(s) above are a nearby-stop suggestion ("useful context"), not a
+    # leg this itinerary instructs the rider to transfer onto, so a detour
+    # on a connector route must never surface here (e.g. a Union -> King
+    # subway rider must not see a 503/504 alert just because one of those
+    # routes happens to stop near an endpoint station).
+    primary_route_ids = {str(line)}
+    detours = await get_detours_for_routes(primary_route_ids)
+    # A real GTFS-RT alert is commonly broadcast as one FeedEntity per stop
+    # id along the corridor (and/or one per recurring date instance), all
+    # with identical text — collapse those down to one before anything else
+    # sees them, rather than deduplicating the already-formatted strings
+    # below (which would still double-count the same real-world closure).
+    detours = _dedupe_by_text(detours, text_of=lambda d: d["summary"])
+    traveled_station_ids = set(stations.stations_on_route(line, origin_station["id"], destination_station["id"]))
+
+    # TTC often files several overlapping alert entries for the same ongoing
+    # construction/detour (e.g. successive phase updates on one corridor) —
+    # summing all of their penalties would compound a single real disruption
+    # into an unrealistic pile-up, so the worst one stands in for the whole
+    # leg's delay while every distinct notice still gets its own badge.
+    detour_warnings: list[str] = []
+    upcoming_detour_notices: list[str] = []
+    detour_delay_minutes = 0.0
+    for detour in detours:
+        # A detour naming specific stations (e.g. "between St Clair and
+        # College") only matters if the rider's own segment actually passes
+        # through one of them — a Union -> King rider must never be warned
+        # about, or penalized for, a closure confined to a stretch their
+        # trip never touches. An alert with no station-level detail at all
+        # (affectedStationIds empty) is treated as route-wide instead of
+        # silently ignored.
+        affected = set(detour["affectedStationIds"])
+        if affected and not (affected & traveled_station_ids):
+            continue
+
+        route_label = "/".join(detour["routeIds"])
+        if detour["isFuture"]:
+            upcoming_detour_notices.append(f"ℹ️ Upcoming: {route_label} — {detour['summary']}")
+            continue
+
+        detour_warnings.append(f"⚠️ Detour active on {route_label}: {detour['summary']}")
+        detour_delay_minutes = max(detour_delay_minutes, detour["penaltyMinutes"])
+
+    # The (subway-only) widget alerts feed and this GTFS-RT detour feed can
+    # both describe the exact same real-world closure/reroute on this line —
+    # stacking both penalties would double-count one event. The
+    # already-applied Service Alert Delay (richer context: headline,
+    # direction, shuttle info) takes priority; the detour signal yields
+    # rather than adding a second penalty and badge for the same thing.
+    if alert_delay_minutes > 0 and detour_delay_minutes > 0:
+        detour_delay_minutes = 0.0
+        detour_warnings = []
+
+    # A parallel Blue Night corridor already exists for this exact line (see
+    # NIGHT_NETWORK_ROUTE_BY_LINE) — a real, already-modeled surface
+    # alternative, not a fabricated second subway path. Only worth
+    # suggesting when the primary route actually has a detour, that
+    # alternative isn't itself detour-affected, AND it's actually running:
+    # the Blue Night network only operates during the subway's own overnight
+    # closure (1:30am-5:30am) — during standard daytime service hours a
+    # 300-series night bus isn't a real alternative at all, so it must never
+    # be suggested then regardless of any detour.
+    alternate_route: Optional[str] = None
+    if detour_delay_minutes > 0 and _is_within_night_network_window(departure):
+        night_route = stations.NIGHT_NETWORK_ROUTE_BY_LINE.get(line)
+        if night_route:
+            alt_route_number, alt_route_name = night_route
+            alt_detours = await get_detours_for_routes({alt_route_number})
+            if not alt_detours:
+                alternate_route = f"Alternate Route (Detour Avoidance): {alt_route_number} {alt_route_name}"
+
+    total_minutes = scheduled_minutes + slow_zone_delay_minutes + alert_delay_minutes + detour_delay_minutes
+    arrival = departure + timedelta(minutes=total_minutes)
+
     return TransitCommuteResponse(
-        origin=origin_station["name"],
-        destination=destination_station["name"],
+        origin=origin_display,
+        destination=destination_display,
         line=line,
         station_hops=hops,
         scheduled_duration_minutes=round(scheduled_minutes, 1),
@@ -241,6 +591,10 @@ async def get_transit_commute_estimate(request: TransitCommuteRequest) -> Transi
         slow_zone_delay_seconds=round(slow_zone_delay_seconds, 1),
         telemetry_source=telemetry_source,
         alert_delay_minutes=round(alert_delay_minutes, 1),
+        detour_delay_minutes=round(detour_delay_minutes, 1),
+        detour_warnings=detour_warnings,
+        upcoming_detour_notices=upcoming_detour_notices,
+        alternate_route=alternate_route,
         total_duration_minutes=round(total_minutes, 1),
         active_slow_zones=[ActiveSlowZone(**zone) for zone in zones_on_route],
         is_disrupted=is_disrupted,

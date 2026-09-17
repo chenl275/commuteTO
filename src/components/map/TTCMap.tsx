@@ -7,18 +7,26 @@ import { CARTO_DARK_STYLE, CARTO_LIGHT_STYLE, DEFAULT_MAP_ZOOM, TORONTO_CENTER }
 import {
   findStationByName,
   getRouteCoordinates,
+  getStationIndexOnLine,
   linesGeoJSON,
   stationsGeoJSON,
 } from "@/lib/geo/subwayGeoJSON";
 import { useIsDarkMode } from "@/components/theme/useIsDarkMode";
 import { getAlerts, getNightBuses, getSlowZones, getStreetcars, getSurfaceStops } from "@/lib/traffic";
+import { reverseGeocode } from "@/lib/geocoding";
 import { formatStationLabel } from "@/lib/stationDisplay";
+import type { LocationSelection } from "@/lib/types";
 import type { TransitCommuteResponse } from "@/types/traffic";
 
 interface TTCMapProps {
   className?: string;
   /** Called when a rider picks "Set as Departure" on a station popup. */
-  onSelectDeparture?: (stationName: string) => void;
+  onSelectDeparture?: (selection: LocationSelection) => void;
+  /** Called when a rider right-clicks/long-presses the map and picks "Set as
+   * Origin" from the resulting pin-drop menu. */
+  onSetOrigin?: (selection: LocationSelection) => void;
+  /** Same as `onSetOrigin`, for "Set as Destination". */
+  onSetDestination?: (selection: LocationSelection) => void;
   /** The most recently calculated commute, used to glow the route + fit the map to it. */
   commuteResult?: TransitCommuteResponse | null;
 }
@@ -41,6 +49,14 @@ const DISRUPTIONS_LAYER_ID = "ttc-disruptions-layer";
 const ROUTE_SOURCE_ID = "ttc-route-highlight";
 const ROUTE_GLOW_LAYER_ID = "ttc-route-highlight-glow";
 const ROUTE_LINE_LAYER_ID = "ttc-route-highlight-line";
+// Drawn instead of the ROUTE_* layers above whenever the backend's
+// multi-modal router (router.py) returned a real walk+transit itinerary,
+// e.g. a cross-line or off-subway-network trip the subway-only fast path
+// can't model as a single straight line.
+const ITINERARY_SOURCE_ID = "ttc-itinerary";
+const ITINERARY_TRANSIT_CASING_LAYER_ID = "ttc-itinerary-transit-casing";
+const ITINERARY_TRANSIT_LAYER_ID = "ttc-itinerary-transit";
+const ITINERARY_WALK_LAYER_ID = "ttc-itinerary-walk";
 const STATIONS_SOURCE_ID = "ttc-stations";
 const STATIONS_LAYER_ID = "ttc-stations-layer";
 const ENDPOINTS_SOURCE_ID = "ttc-route-endpoints";
@@ -72,6 +88,20 @@ const NIGHT_BUS_LAYER_IDS = [NIGHT_BUSES_LAYER_ID, NIGHT_BUS_STOPS_HALO_LAYER_ID
 
 const NIGHT_BUS_COLOR = "#2A4365";
 const SURFACE_STOP_COLOR = "#BA0C2F";
+
+// Official TTC subway line colors (see project CLAUDE.md), keyed by the
+// route's GTFS short_name — the same string router.py surfaces as an
+// itinerary leg's routeShortName. Buses and streetcars both render in TTC's
+// surface-transit red, matching SURFACE_STOP_COLOR above.
+const SUBWAY_LINE_COLORS: Record<string, string> = {
+  "1": "#FFD200",
+  "2": "#009A44",
+  "4": "#A05EB5",
+  "5": "#F58220",
+  "6": "#8A8D8F",
+};
+const SURFACE_TRANSIT_COLOR = SURFACE_STOP_COLOR;
+const WALK_LEG_COLOR = "#9CA3AF";
 
 // Zoom-scaled width/opacity for the two surface networks — kept far below
 // subway's stroke width (see LINES_LAYER_ID) so subway always reads as the
@@ -116,6 +146,12 @@ const STATION_RADIUS_EXPRESSION: any = [
 ];
 const STATION_STROKE_WIDTH_EXPRESSION: any = ["step", ["zoom"], 1.5, 12, 2, 14, 2.5];
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+// How long a touch must be held before it counts as a long-press (opens the
+// "Set as Origin"/"Set as Destination" pin-drop menu) rather than the start
+// of a pan/drag gesture.
+const LONG_PRESS_MS = 550;
+
 const HOVERED_SURFACE_LINE_WIDTH = 3.0;
 const HOVERED_SURFACE_LINE_OPACITY = 1.0;
 const DIMMED_SURFACE_LINE_OPACITY = 0.2;
@@ -155,8 +191,8 @@ const lineMetaById: Map<number, (typeof linesGeoJSON.features)[number]["properti
 );
 
 function buildPopupContent(
-  station: { name: string; lines: number[] },
-  onSelectDeparture: (stationName: string) => void
+  station: { name: string; lines: number[]; lon: number; lat: number },
+  onSelectDeparture: (selection: LocationSelection) => void
 ): HTMLElement {
   const container = document.createElement("div");
   container.className = "min-w-[170px] p-1";
@@ -187,8 +223,37 @@ function buildPopupContent(
   button.className =
     "w-full rounded-full bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700";
   button.textContent = "Set as Departure";
-  button.addEventListener("click", () => onSelectDeparture(formatStationLabel(station.name)));
+  button.addEventListener("click", () =>
+    onSelectDeparture({ name: formatStationLabel(station.name), lat: station.lat, lon: station.lon })
+  );
   container.appendChild(button);
+
+  return container;
+}
+
+/** The "Set as Origin" / "Set as Destination" menu shown on a right-click or
+ * long-press anywhere on the map (see the contextmenu/touchstart handlers
+ * below) — lets a rider drop a pin at an arbitrary point, not just a
+ * station, and use it as a commute endpoint. */
+function buildPinContextMenuContent(onSetOrigin: () => void, onSetDestination: () => void): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "flex min-w-[170px] flex-col gap-0.5 p-1";
+
+  const originButton = document.createElement("button");
+  originButton.type = "button";
+  originButton.className =
+    "w-full rounded-lg px-3 py-1.5 text-left text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-50";
+  originButton.textContent = "📍 Set as Origin";
+  originButton.addEventListener("click", onSetOrigin);
+  container.appendChild(originButton);
+
+  const destinationButton = document.createElement("button");
+  destinationButton.type = "button";
+  destinationButton.className =
+    "w-full rounded-lg px-3 py-1.5 text-left text-xs font-semibold text-red-700 transition-colors hover:bg-red-50";
+  destinationButton.textContent = "🏁 Set as Destination";
+  destinationButton.addEventListener("click", onSetDestination);
+  container.appendChild(destinationButton);
 
   return container;
 }
@@ -262,8 +327,13 @@ function addSlowZoneLayer(map: maplibregl.Map, data: GeoJSON.FeatureCollection) 
       layout: { "line-cap": "round", "line-join": "round" },
       paint: {
         "line-color": "#f59e0b",
-        "line-width": 6,
-        "line-dasharray": [1.4, 1.4],
+        "line-width": 5,
+        // Explicit 0 (MapLibre's own default) so this stays a color
+        // override centered directly on the track, not a detached parallel
+        // line — the real fix is the source geometry above matching the
+        // base line's curve exactly; this just documents the intent.
+        "line-offset": 0,
+        "line-dasharray": [3, 2],
         "line-opacity": 0.95,
       },
     });
@@ -392,16 +462,20 @@ function addSurfaceStopsLayer(
 
     // A soft amber halo under interchange stops, so a transfer point stands
     // out from an ordinary stop without needing a whole separate icon.
+    // minzoom 15 (not city-wide) — these stop coordinates are the nearest
+    // surface stop to a subway station, not necessarily right outside its
+    // entrance, so at low zoom they land off to one side of the station
+    // marker and read as visual clutter rather than useful detail.
     if (!map.getLayer(haloLayerId)) {
       map.addLayer({
         id: haloLayerId,
         type: "circle",
         source: SURFACE_STOPS_SOURCE_ID,
-        minzoom: 14.0,
+        minzoom: 15.0,
         filter: ["all", servesNetwork, ["==", ["get", "isInterchange"], true]],
         layout: { visibility: visibilityValue },
         paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 14, 5, 16, 7],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 15, 5, 17, 7],
           "circle-color": "#fbbf24",
           "circle-opacity": 0.35,
           "circle-blur": 0.6,
@@ -413,11 +487,11 @@ function addSurfaceStopsLayer(
         id: layerId,
         type: "circle",
         source: SURFACE_STOPS_SOURCE_ID,
-        minzoom: 14.0,
+        minzoom: 15.0,
         filter: servesNetwork,
         layout: { visibility: visibilityValue },
         paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 14, 1.8, 16, 3.0],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 15, 1.8, 17, 3.0],
           "circle-color": SURFACE_STOP_COLOR,
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 1,
@@ -428,7 +502,16 @@ function addSurfaceStopsLayer(
 }
 
 /** Elevates the hovered surface route to full opacity/3px width and dims
- * every other streetcar/night-bus line to 0.2 opacity, across both layers. */
+ * every other streetcar/night-bus line to 0.2 opacity, across both layers.
+ *
+ * MapLibre requires a zoom expression to be the top-level expression (or
+ * nested inside a top-level "step"/"interpolate" — matching the
+ * STATION_RADIUS_EXPRESSION pattern above): wrapping "case" around the
+ * whole zoom-based width expression, as this used to do, throws
+ * `"zoom" expression may only be used as input to a top-level "step" or
+ * "interpolate" expression` the moment a route is hovered. The fix keeps
+ * "interpolate"/["zoom"] at the top and moves the hover "case" inside each
+ * zoom stop's output value instead. */
 function highlightSurfaceRoute(map: maplibregl.Map, routeId: string, direction: number) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see the STREETCAR/NIGHT_BUS expression constants above
   const isHovered: any = [
@@ -438,10 +521,15 @@ function highlightSurfaceRoute(map: maplibregl.Map, routeId: string, direction: 
   ];
 
   map.setPaintProperty(STREETCARS_LAYER_ID, "line-width", [
-    "case",
-    isHovered,
-    HOVERED_SURFACE_LINE_WIDTH,
-    STREETCAR_WIDTH_EXPRESSION,
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    10,
+    ["case", isHovered, HOVERED_SURFACE_LINE_WIDTH, 0.75],
+    12,
+    ["case", isHovered, HOVERED_SURFACE_LINE_WIDTH, 1.2],
+    14,
+    ["case", isHovered, HOVERED_SURFACE_LINE_WIDTH, 2.0],
   ]);
   map.setPaintProperty(STREETCARS_LAYER_ID, "line-opacity", [
     "case",
@@ -451,10 +539,15 @@ function highlightSurfaceRoute(map: maplibregl.Map, routeId: string, direction: 
   ]);
 
   map.setPaintProperty(NIGHT_BUSES_LAYER_ID, "line-width", [
-    "case",
-    isHovered,
-    HOVERED_SURFACE_LINE_WIDTH,
-    NIGHT_BUS_WIDTH_EXPRESSION,
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    10,
+    ["case", isHovered, HOVERED_SURFACE_LINE_WIDTH, 0.75],
+    12,
+    ["case", isHovered, HOVERED_SURFACE_LINE_WIDTH, 1.0],
+    14,
+    ["case", isHovered, HOVERED_SURFACE_LINE_WIDTH, 1.6],
   ]);
   map.setPaintProperty(NIGHT_BUSES_LAYER_ID, "line-opacity", [
     "case",
@@ -510,18 +603,18 @@ function addRouteHighlightLayers(map: maplibregl.Map, data: GeoJSON.FeatureColle
   if (!map.getSource(ROUTE_SOURCE_ID)) {
     map.addSource(ROUTE_SOURCE_ID, { type: "geojson", data });
   }
+  // A dark casing beneath the line's own official TTC color (e.g. Line 1's
+  // #F8C300) keeps it legible against the basemap — matching the base
+  // subway network's own casing+color treatment (see addBaseLineLayer)
+  // rather than the blurred glow + white overlay this used to be, which hid
+  // the actual line color entirely. Solid, never dashed or animated.
   if (!map.getLayer(ROUTE_GLOW_LAYER_ID)) {
     map.addLayer({
       id: ROUTE_GLOW_LAYER_ID,
       type: "line",
       source: ROUTE_SOURCE_ID,
       layout: { "line-cap": "round", "line-join": "round" },
-      paint: {
-        "line-color": ["get", "colorHex"],
-        "line-width": 18,
-        "line-blur": 8,
-        "line-opacity": 0.6,
-      },
+      paint: { "line-color": "#111827", "line-width": 8 },
     });
   }
   if (!map.getLayer(ROUTE_LINE_LAYER_ID)) {
@@ -530,7 +623,53 @@ function addRouteHighlightLayers(map: maplibregl.Map, data: GeoJSON.FeatureColle
       type: "line",
       source: ROUTE_SOURCE_ID,
       layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": "#ffffff", "line-width": 3, "line-opacity": 0.9 },
+      paint: { "line-color": ["get", "colorHex"], "line-width": 5 },
+    });
+  }
+}
+
+function addItineraryLayers(map: maplibregl.Map, data: GeoJSON.FeatureCollection) {
+  if (!map.getSource(ITINERARY_SOURCE_ID)) {
+    map.addSource(ITINERARY_SOURCE_ID, { type: "geojson", data });
+  }
+  /* eslint-disable @typescript-eslint/no-explicit-any -- see the STREETCAR/NIGHT_BUS expression constants above */
+  const isWalkLeg: any = ["==", ["get", "mode"], "walk"];
+  const isTransitLeg: any = ["!=", ["get", "mode"], "walk"];
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
+  if (!map.getLayer(ITINERARY_TRANSIT_CASING_LAYER_ID)) {
+    map.addLayer({
+      id: ITINERARY_TRANSIT_CASING_LAYER_ID,
+      type: "line",
+      source: ITINERARY_SOURCE_ID,
+      filter: isTransitLeg,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#111827", "line-width": 6 },
+    });
+  }
+  if (!map.getLayer(ITINERARY_TRANSIT_LAYER_ID)) {
+    map.addLayer({
+      id: ITINERARY_TRANSIT_LAYER_ID,
+      type: "line",
+      source: ITINERARY_SOURCE_ID,
+      filter: isTransitLeg,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "colorHex"], "line-width": 4 },
+    });
+  }
+  // A crisp, thin dashed line for each walk leg (origin -> first stop, a
+  // transfer, or the last stop -> destination) — deliberately thinner than
+  // the solid transit legs' 4px (see ITINERARY_TRANSIT_LAYER_ID) so it never
+  // reads as another track, drawn on top of them since walk legs are short
+  // and would otherwise be hard to spot under a casing.
+  if (!map.getLayer(ITINERARY_WALK_LAYER_ID)) {
+    map.addLayer({
+      id: ITINERARY_WALK_LAYER_ID,
+      type: "line",
+      source: ITINERARY_SOURCE_ID,
+      filter: isWalkLeg,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": WALK_LEG_COLOR, "line-width": 2, "line-dasharray": [1.5, 1.5] },
     });
   }
 }
@@ -586,12 +725,104 @@ function addEndpointHighlightLayers(map: maplibregl.Map, data: GeoJSON.FeatureCo
   }
 }
 
+function itineraryLegColor(leg: TransitCommuteResponse["itinerary"][number]): string {
+  if (leg.mode === "subway") {
+    return (leg.routeShortName && SUBWAY_LINE_COLORS[leg.routeShortName]) || "#ffffff";
+  }
+  return SURFACE_TRANSIT_COLOR;
+}
+
+/** The canonical station coordinate for `name` when it names one (the
+ * backend reports a clean canonical name for a subway/streetcar/bus leg's
+ * station end — see traffic_service.py's station-name cleanup), otherwise
+ * `fallback` unchanged. A leg's path ends on the specific stop/platform it
+ * actually boarded/alighted at, which can sit slightly off that station's
+ * single map marker — or, on a curved line like Line 1's loop through
+ * Union, slightly past it into the loop's tail — so the itinerary's very
+ * first/last rendered point is snapped to the same dot the marker uses,
+ * keeping the highlighted route's terminus and the endpoint pin pixel-identical. */
+function snapToStationCoordinate(name: string, fallback: [number, number]): [number, number] {
+  return findStationByName(name)?.coordinates ?? fallback;
+}
+
+/** Builds the dashed-walk + solid-transit line layers, plus origin/destination
+ * dots, from a router.py itinerary's actual leg coordinates — snapped onto
+ * the canonical station coordinate at either end when that leg's endpoint
+ * names a known station (see snapToStationCoordinate above). */
+function computeItineraryFeatures(result: TransitCommuteResponse | null): {
+  itinerary: GeoJSON.FeatureCollection;
+  endpoints: GeoJSON.FeatureCollection;
+  bounds: maplibregl.LngLatBounds | null;
+} {
+  if (!result || result.itinerary.length === 0) {
+    return { itinerary: EMPTY_FEATURE_COLLECTION, endpoints: EMPTY_FEATURE_COLLECTION, bounds: null };
+  }
+
+  const firstLeg = result.itinerary[0];
+  const lastLeg = result.itinerary[result.itinerary.length - 1];
+  const originPoint: [number, number] | undefined = firstLeg.path[0]
+    ? snapToStationCoordinate(firstLeg.fromName, firstLeg.path[0])
+    : undefined;
+  const destinationPoint: [number, number] | undefined = lastLeg.path[lastLeg.path.length - 1]
+    ? snapToStationCoordinate(lastLeg.toName, lastLeg.path[lastLeg.path.length - 1])
+    : undefined;
+
+  const features: GeoJSON.Feature[] = result.itinerary
+    .filter((leg) => leg.path.length > 1)
+    .map((leg) => {
+      const coordinates = leg.path.map((point) => point as [number, number]);
+      if (leg === firstLeg && originPoint) coordinates[0] = originPoint;
+      if (leg === lastLeg && destinationPoint) coordinates[coordinates.length - 1] = destinationPoint;
+      return {
+        type: "Feature" as const,
+        geometry: { type: "LineString" as const, coordinates },
+        properties: { mode: leg.mode, colorHex: itineraryLegColor(leg) },
+      };
+    });
+
+  const endpoints: GeoJSON.FeatureCollection = {
+    type: "FeatureCollection",
+    features: [
+      ...(originPoint
+        ? [
+            {
+              type: "Feature" as const,
+              geometry: { type: "Point" as const, coordinates: originPoint },
+              properties: { role: "origin", name: result.origin },
+            },
+          ]
+        : []),
+      ...(destinationPoint
+        ? [
+            {
+              type: "Feature" as const,
+              geometry: { type: "Point" as const, coordinates: destinationPoint },
+              properties: { role: "destination", name: result.destination },
+            },
+          ]
+        : []),
+    ],
+  };
+
+  let bounds: maplibregl.LngLatBounds | null = null;
+  for (const feature of features) {
+    for (const coordinate of (feature.geometry as GeoJSON.LineString).coordinates) {
+      const point = coordinate as [number, number];
+      bounds = bounds ? bounds.extend(point) : new maplibregl.LngLatBounds(point, point);
+    }
+  }
+
+  return { itinerary: { type: "FeatureCollection", features }, endpoints, bounds };
+}
+
 function computeRouteFeatures(result: TransitCommuteResponse | null): {
   route: GeoJSON.FeatureCollection;
   endpoints: GeoJSON.FeatureCollection;
   bounds: maplibregl.LngLatBounds | null;
 } {
-  if (!result) {
+  // The multi-modal itinerary (see computeItineraryFeatures) owns rendering
+  // for this result instead — drawing both would double up the endpoint dots.
+  if (!result || result.itinerary.length > 0) {
     return { route: EMPTY_FEATURE_COLLECTION, endpoints: EMPTY_FEATURE_COLLECTION, bounds: null };
   }
 
@@ -601,7 +832,18 @@ function computeRouteFeatures(result: TransitCommuteResponse | null): {
     return { route: EMPTY_FEATURE_COLLECTION, endpoints: EMPTY_FEATURE_COLLECTION, bounds: null };
   }
 
-  const coordinates = getRouteCoordinates(result.line, originStation.id, destinationStation.id);
+  // getRouteCoordinates always returns stations in ascending line-index
+  // order, regardless of which endpoint is actually the origin — reverse
+  // when travel runs the other way, so the LineString's point order (and
+  // therefore the direction the route-pulse animation appears to flow)
+  // always matches origin -> destination.
+  const rawCoordinates = getRouteCoordinates(result.line, originStation.id, destinationStation.id);
+  const originIndex = getStationIndexOnLine(result.line, originStation.id);
+  const destinationIndex = getStationIndexOnLine(result.line, destinationStation.id);
+  const coordinates =
+    originIndex !== null && destinationIndex !== null && originIndex > destinationIndex
+      ? [...rawCoordinates].reverse()
+      : rawCoordinates;
   const lineMeta = lineMetaById.get(result.line);
 
   const route: GeoJSON.FeatureCollection =
@@ -618,17 +860,27 @@ function computeRouteFeatures(result: TransitCommuteResponse | null): {
         }
       : EMPTY_FEATURE_COLLECTION;
 
+  // The pin sits wherever the line actually ends, not the station's separate
+  // canonical dot (ttc-stations.json) — getRouteCoordinates deliberately
+  // slices pure track vertices with no anchoring (see its own comment), so
+  // its real endpoint can sit 50-200m from that dot. Following the line's
+  // own endpoint keeps the marker glued to the visible track terminus
+  // instead of floating off to the side of it; only falls back to the
+  // canonical dot when there's no route line to anchor to at all.
+  const originPoint = coordinates.length > 0 ? coordinates[0] : originStation.coordinates;
+  const destinationPoint = coordinates.length > 0 ? coordinates[coordinates.length - 1] : destinationStation.coordinates;
+
   const endpoints: GeoJSON.FeatureCollection = {
     type: "FeatureCollection",
     features: [
       {
         type: "Feature",
-        geometry: { type: "Point", coordinates: originStation.coordinates },
+        geometry: { type: "Point", coordinates: originPoint },
         properties: { role: "origin", name: originStation.name },
       },
       {
         type: "Feature",
-        geometry: { type: "Point", coordinates: destinationStation.coordinates },
+        geometry: { type: "Point", coordinates: destinationPoint },
         properties: { role: "destination", name: destinationStation.name },
       },
     ],
@@ -648,6 +900,8 @@ function computeRouteFeatures(result: TransitCommuteResponse | null): {
 export default function TTCMap({
   className = "",
   onSelectDeparture,
+  onSetOrigin,
+  onSetDestination,
   commuteResult = null,
 }: TTCMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -678,6 +932,7 @@ export default function TTCMap({
   const nightBusesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const surfaceStopsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const routeDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+  const itineraryDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const endpointsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
 
   // Fetch the (static) streetcar + night-bus networks, and their stops, once on mount.
@@ -734,16 +989,18 @@ export default function TTCMap({
         const features: GeoJSON.Feature[] = [];
         for (const zone of data.slowZones) {
           if (!zone.fromStationId || !zone.toStationId) continue;
-          const from = stationsGeoJSON.features.find((f) => f.properties.id === zone.fromStationId);
-          const to = stationsGeoJSON.features.find((f) => f.properties.id === zone.toStationId);
-          if (!from || !to) continue;
+          // Must be the exact same polyline the base subway line renders
+          // (see getRouteCoordinates/LINE_SHAPES in subwayGeoJSON.ts) — a
+          // straight chord between the two station points here would
+          // visibly diverge from the base line's real curved track
+          // wherever the track bends, reading as a second, parallel line
+          // running alongside it rather than sitting on top of it.
+          const coordinates = getRouteCoordinates(zone.line, zone.fromStationId, zone.toStationId);
+          if (coordinates.length < 2) continue;
 
           features.push({
             type: "Feature",
-            geometry: {
-              type: "LineString",
-              coordinates: [from.geometry.coordinates, to.geometry.coordinates],
-            },
+            geometry: { type: "LineString", coordinates },
             properties: { line: zone.line, direction: zone.direction },
           });
         }
@@ -834,11 +1091,20 @@ export default function TTCMap({
     );
     mapRef.current = map;
 
-    const handleDeparture = onSelectDeparture ?? ((name: string) => console.log("Set as departure:", name));
+    const handleDeparture =
+      onSelectDeparture ?? ((selection: LocationSelection) => console.log("Set as departure:", selection));
+    const handleSetOrigin =
+      onSetOrigin ?? ((selection: LocationSelection) => console.log("Set as origin:", selection));
+    const handleSetDestination =
+      onSetDestination ?? ((selection: LocationSelection) => console.log("Set as destination:", selection));
 
     let interactionsBound = false;
     let disruptionHoverPopup: maplibregl.Popup | null = null;
     let surfaceRouteHoverPopup: maplibregl.Popup | null = null;
+    let pinContextMenuPopup: maplibregl.Popup | null = null;
+    let originPinMarker: maplibregl.Marker | null = null;
+    let destinationPinMarker: maplibregl.Marker | null = null;
+    let longPressTimer: ReturnType<typeof setTimeout> | null = null;
     let stopHoverPopup: maplibregl.Popup | null = null;
 
     // "style.load" (unlike "load") fires again every time setStyle() swaps
@@ -853,6 +1119,7 @@ export default function TTCMap({
       addSlowZoneLayer(map, slowZonesDataRef.current);
       addDisruptionLayers(map, disruptionsDataRef.current);
       addRouteHighlightLayers(map, routeDataRef.current);
+      addItineraryLayers(map, itineraryDataRef.current);
       addStationsLayer(map);
       addSurfaceStopsLayer(map, surfaceStopsDataRef.current, {
         streetcars: layerVisibilityRef.current.streetcars,
@@ -881,10 +1148,11 @@ export default function TTCMap({
         const lines = Array.isArray(properties.lines)
           ? properties.lines
           : (JSON.parse(properties.lines as unknown as string) as number[]);
+        const [lon, lat] = feature.geometry.coordinates as [number, number];
 
         new maplibregl.Popup({ offset: 12 })
           .setLngLat(feature.geometry.coordinates as [number, number])
-          .setDOMContent(buildPopupContent({ name: properties.name, lines }, handleDeparture))
+          .setDOMContent(buildPopupContent({ name: properties.name, lines, lon, lat }, handleDeparture))
           .addTo(map);
       });
 
@@ -998,14 +1266,84 @@ export default function TTCMap({
           stopHoverPopup = null;
         });
       }
+
+      // Drops a clean marker at `lngLat` for `role` (replacing any previous
+      // pin of that same role) and reverse-geocodes it into a rider-facing
+      // label — see lib/geocoding.ts — before handing it to the form.
+      function placePin(role: "origin" | "destination", lngLat: maplibregl.LngLat) {
+        const marker = new maplibregl.Marker({ color: role === "origin" ? "#10b981" : "#ef4444" })
+          .setLngLat(lngLat)
+          .addTo(map);
+        if (role === "origin") {
+          originPinMarker?.remove();
+          originPinMarker = marker;
+        } else {
+          destinationPinMarker?.remove();
+          destinationPinMarker = marker;
+        }
+
+        reverseGeocode(lngLat.lat, lngLat.lng).then((name) => {
+          const selection: LocationSelection = { name, lat: lngLat.lat, lon: lngLat.lng };
+          if (role === "origin") {
+            handleSetOrigin(selection);
+          } else {
+            handleSetDestination(selection);
+          }
+        });
+      }
+
+      function showPinContextMenu(lngLat: maplibregl.LngLat) {
+        pinContextMenuPopup?.remove();
+        pinContextMenuPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, offset: 4 })
+          .setLngLat(lngLat)
+          .setDOMContent(
+            buildPinContextMenuContent(
+              () => {
+                placePin("origin", lngLat);
+                pinContextMenuPopup?.remove();
+              },
+              () => {
+                placePin("destination", lngLat);
+                pinContextMenuPopup?.remove();
+              }
+            )
+          )
+          .addTo(map);
+      }
+
+      // Desktop: right-click anywhere on the map (MapLibre already suppresses
+      // the browser's own context menu on the canvas).
+      map.on("contextmenu", (event) => {
+        showPinContextMenu(event.lngLat);
+      });
+
+      // Mobile/touch: long-press anywhere on the map — cancelled by any
+      // finger movement or a second touch point (a pan/pinch gesture, not a
+      // press-and-hold), or by lifting the finger before the threshold.
+      const cancelLongPress = () => {
+        if (longPressTimer) {
+          clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+      };
+      map.on("touchstart", (event) => {
+        if (event.points.length > 1) return;
+        cancelLongPress();
+        const pressLngLat = event.lngLat;
+        longPressTimer = setTimeout(() => showPinContextMenu(pressLngLat), LONG_PRESS_MS);
+      });
+      map.on("touchmove", cancelLongPress);
+      map.on("touchend", cancelLongPress);
+      map.on("touchcancel", cancelLongPress);
     });
 
     return () => {
+      if (longPressTimer) clearTimeout(longPressTimer);
       map.remove();
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- isDark is read once for the initial style; later changes go through the effect below
-  }, [onSelectDeparture]);
+  }, [onSelectDeparture, onSetOrigin, onSetDestination]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1031,16 +1369,25 @@ export default function TTCMap({
     applyLayerVisibility(map, layerVisibility);
   }, [layerVisibility]);
 
-  // Glow the route + highlight both endpoints whenever a commute is calculated.
+  // Glow the route (or, for a multi-modal router.py result, draw its
+  // dashed-walk + solid-transit legs instead) and highlight both endpoints
+  // whenever a commute is calculated.
   useEffect(() => {
-    const { route, endpoints, bounds } = computeRouteFeatures(commuteResult);
+    const { route, endpoints: routeEndpoints, bounds: routeBounds } = computeRouteFeatures(commuteResult);
+    const { itinerary, endpoints: itineraryEndpoints, bounds: itineraryBounds } =
+      computeItineraryFeatures(commuteResult);
+    const endpoints = commuteResult?.itinerary.length ? itineraryEndpoints : routeEndpoints;
+    const bounds = itineraryBounds ?? routeBounds;
+
     routeDataRef.current = route;
+    itineraryDataRef.current = itinerary;
     endpointsDataRef.current = endpoints;
 
     const map = mapRef.current;
     if (!map) return;
 
     (map.getSource(ROUTE_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(route);
+    (map.getSource(ITINERARY_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(itinerary);
     (map.getSource(ENDPOINTS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(endpoints);
 
     if (bounds) {

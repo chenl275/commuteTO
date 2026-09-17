@@ -10,6 +10,14 @@ class TransitCommuteRequest(BaseModel):
 
     origin: Union[str, Coordinates]
     destination: Union[str, Coordinates]
+    # Explicit coordinates for a geocoded address or a map-dropped pin — kept
+    # alongside the rider-facing display string (unlike the legacy
+    # origin/destination-as-tuple form above) so the response can still echo
+    # back "214 College St" instead of silently swapping in a station name.
+    origin_lat: Optional[float] = Field(default=None, alias="originLat")
+    origin_lon: Optional[float] = Field(default=None, alias="originLon")
+    dest_lat: Optional[float] = Field(default=None, alias="destLat")
+    dest_lon: Optional[float] = Field(default=None, alias="destLon")
     departure_time: Optional[str] = Field(default=None, alias="departureTime")
 
 
@@ -77,6 +85,33 @@ class CommuteStep(BaseModel):
     stop_count: int = Field(alias="stopCount")
 
 
+class ItineraryLeg(BaseModel):
+    """One leg of a router.py multi-modal itinerary — either a walk (origin
+    to the first stop, a transfer, or the last stop to the destination) or a
+    scheduled transit ride, in the order the rider actually travels them."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: str  # "walk" | "bus" | "streetcar" | "subway"
+    route_short_name: Optional[str] = Field(default=None, alias="routeShortName")
+    route_long_name: Optional[str] = Field(default=None, alias="routeLongName")
+    # Rider-facing compass direction ("Southbound", ...), read off this leg's
+    # boarding stop — see router.py's _extract_direction. None for a walk
+    # leg, or a transit leg boarding where GTFS has no directional platform label.
+    direction: Optional[str] = None
+    from_name: str = Field(alias="fromName")
+    to_name: str = Field(alias="toName")
+    stop_count: int = Field(default=0, alias="stopCount")
+    distance_meters: Optional[float] = Field(default=None, alias="distanceMeters")
+    duration_minutes: float = Field(alias="durationMinutes")
+    departure_time: str = Field(alias="departureTime")
+    arrival_time: str = Field(alias="arrivalTime")
+    # [lon, lat] pairs in travel order — a straight line for a walk leg, the
+    # actual boarded-to-alighted stop sequence for a transit leg. Matches the
+    # [lon, lat] convention used everywhere else in this codebase (GeoJSON).
+    path: list[Coordinates] = Field(default_factory=list)
+
+
 class TransitCommuteResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -89,11 +124,19 @@ class TransitCommuteResponse(BaseModel):
     slow_zone_delay_seconds: float = Field(alias="slowZoneDelaySeconds")
     telemetry_source: str = Field(alias="telemetrySource")  # "gtfs_realtime" | "kinematic_model"
     alert_delay_minutes: float = Field(alias="alertDelayMinutes")
+    detour_delay_minutes: float = Field(default=0.0, alias="detourDelayMinutes")
+    detour_warnings: list[str] = Field(default_factory=list, alias="detourWarnings")
+    upcoming_detour_notices: list[str] = Field(default_factory=list, alias="upcomingDetourNotices")
+    alternate_route: Optional[str] = Field(default=None, alias="alternateRoute")
     total_duration_minutes: float = Field(alias="totalDurationMinutes")
     active_slow_zones: list[ActiveSlowZone] = Field(alias="activeSlowZones")
     is_disrupted: bool = Field(alias="isDisrupted")
     active_alerts_on_route: list[ServiceAlert] = Field(alias="activeAlertsOnRoute")
     steps: list[CommuteStep] = Field(default_factory=list)
+    # Populated by router.py's multi-modal (walk+bus+streetcar+subway) fallback
+    # path — empty for the subway-only fast path, which the existing `steps`
+    # summary + map route-highlight already cover.
+    itinerary: list[ItineraryLeg] = Field(default_factory=list)
     departure_time: str = Field(alias="departureTime")
     arrival_time: str = Field(alias="arrivalTime")
     source: str

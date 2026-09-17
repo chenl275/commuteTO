@@ -1,5 +1,5 @@
 import { formatStationLabel } from "@/lib/stationDisplay";
-import type { AlertCategory, ServiceAlert, TransitCommuteResponse } from "@/types/traffic";
+import type { AlertCategory, ItineraryLeg, ServiceAlert, TransitCommuteResponse } from "@/types/traffic";
 
 interface CommuteResultCardProps {
   result: TransitCommuteResponse;
@@ -66,6 +66,31 @@ function sortAlertsBySeverity(alerts: ServiceAlert[]): ServiceAlert[] {
   });
 }
 
+// The backend already dedupes upcomingDetourNotices, but
+// activeAlertsOnRoute's upcoming entries are a separate source, and the two
+// can independently describe the same real closure — so this collapses
+// both into one deduplicated list for a single combined display.
+
+function normalizeForDedup(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function dedupeText(items: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const item of items) {
+    const key = normalizeForDedup(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
 function formatMinutes(minutes: number): string {
   const rounded = Math.round(minutes);
   return `${rounded} min${rounded === 1 ? "" : "s"}`;
@@ -77,17 +102,75 @@ function formatClockTime(iso: string): string {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+// Populated by the backend's multi-modal (walk + bus + streetcar + subway)
+// router fallback — see router.py — for a trip the subway-only fast path
+// can't handle (e.g. a cross-line or off-subway-network origin/destination).
+const ITINERARY_MODE_ICONS: Record<ItineraryLeg["mode"], string> = {
+  walk: "🚶",
+  bus: "🚌",
+  streetcar: "🚋",
+  subway: "🚇",
+};
+
+/** e.g. "Line 1 Southbound to Union Station" (subway), "506 to Dundas West
+ * Station" (streetcar/bus), or "Walk 117m to College Station". */
+function formatItineraryLegHeadline(leg: ItineraryLeg): string {
+  const destination = formatStationLabel(leg.toName);
+  if (leg.mode === "walk") {
+    const meters = leg.distanceMeters != null ? Math.round(leg.distanceMeters) : null;
+    return `Walk${meters ? ` ${meters}m` : ""} to ${destination}`;
+  }
+  const routePrefix = leg.mode === "subway" ? `Line ${leg.routeShortName ?? ""}` : leg.routeShortName ?? "";
+  const directionSuffix = leg.direction ? ` ${leg.direction}` : "";
+  return `${routePrefix}${directionSuffix} to ${destination}`;
+}
+
+/** e.g. "4 stops" — the muted trailing detail joined onto the headline with
+ * a middle dot; null for a walk leg, which has nothing more to add. */
+function formatItineraryLegDetail(leg: ItineraryLeg): string | null {
+  if (leg.mode === "walk") return null;
+  return `${leg.stopCount} stop${leg.stopCount === 1 ? "" : "s"}`;
+}
+
+// A walk leg strictly between two transit legs is almost always just
+// crossing the street or platform to the next stop — real transfer noise,
+// not a turn-by-turn direction worth its own line (e.g. "Walk 40m to
+// Sheppard Ave West"). The backend already drops the truly trivial walks
+// bracketing the origin/destination itself (see traffic_service.py's
+// MICRO_WALK_SUPPRESSION_METERS) — this catches the ones in between that it
+// deliberately leaves alone, since a real street-level transfer can still
+// matter. The very first and last legs always show regardless of size,
+// since those describe how the rider actually reaches/leaves the transit
+// network, not a same-stop shuffle.
+const MID_TRIP_WALK_MIN_MINUTES = 3;
+const MID_TRIP_WALK_MIN_METERS = 250;
+
+function isDisplayedLeg(leg: ItineraryLeg, index: number, legs: ItineraryLeg[]): boolean {
+  if (leg.mode !== "walk") return true;
+  if (index === 0 || index === legs.length - 1) return true;
+  return leg.durationMinutes > MID_TRIP_WALK_MIN_MINUTES || (leg.distanceMeters ?? 0) > MID_TRIP_WALK_MIN_METERS;
+}
+
 export default function CommuteResultCard({ result, className = "" }: CommuteResultCardProps) {
   const delayBadge = formatDelayBadge(result.slowZoneDelaySeconds);
   const isLiveTelemetry = result.telemetrySource === "gtfs_realtime";
+
+  // Split activeAlertsOnRoute so its "upcoming" entries join the one
+  // combined, collapsible Upcoming Notices section below instead of a
+  // second always-expanded block duplicating the same sky-blue treatment.
+  const activeAlerts = result.activeAlertsOnRoute.filter((alert) => !alert.isUpcomingNotice);
+  const upcomingAlertNotices = result.activeAlertsOnRoute
+    .filter((alert) => alert.isUpcomingNotice)
+    .map((alert) => `ℹ️ Upcoming: ${alert.headline}`);
+  const upcomingNotices = dedupeText([...upcomingAlertNotices, ...result.upcomingDetourNotices]);
 
   return (
     <div
       className={`rounded-2xl border border-neutral-200 bg-neutral-50 p-4 dark:border-white/10 dark:bg-white/5 ${className}`}
     >
-      {result.activeAlertsOnRoute.length > 0 && (
+      {activeAlerts.length > 0 && (
         <div className="mb-3 flex flex-col gap-2">
-          {sortAlertsBySeverity(result.activeAlertsOnRoute).map((alert) => (
+          {sortAlertsBySeverity(activeAlerts).map((alert) => (
             <div
               key={alert.id}
               className={`rounded-xl border px-3 py-2 text-xs font-medium ${getAlertBannerStyle(alert)}`}
@@ -96,6 +179,43 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
             </div>
           ))}
         </div>
+      )}
+
+      {result.detourWarnings.length > 0 && (
+        <div className="mb-3 flex flex-col gap-2">
+          {result.detourWarnings.map((warning) => (
+            <div
+              key={warning}
+              className="rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-xs font-medium text-red-900 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100"
+            >
+              {warning}
+            </div>
+          ))}
+          {result.alternateRoute && (
+            <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-500/15 dark:text-emerald-100">
+              🔁 {result.alternateRoute}
+            </div>
+          )}
+        </div>
+      )}
+
+      {upcomingNotices.length > 0 && (
+        <details className="group mb-3">
+          <summary className="cursor-pointer list-none text-xs font-semibold text-sky-700 marker:content-none dark:text-sky-300">
+            ℹ️ Upcoming Notices ({upcomingNotices.length})
+            <span className="ml-1 inline-block transition-transform group-open:rotate-180">▾</span>
+          </summary>
+          <div className="mt-2 flex max-h-60 flex-col gap-2 overflow-y-auto">
+            {upcomingNotices.map((notice) => (
+              <div
+                key={notice}
+                className={`rounded-xl border px-3 py-2 text-xs font-medium ${UPCOMING_NOTICE_BANNER_STYLE}`}
+              >
+                {notice}
+              </div>
+            ))}
+          </div>
+        </details>
       )}
 
       <div className="flex items-center justify-between gap-3">
@@ -117,9 +237,41 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
         </div>
       </div>
 
-      <p className="mt-2 text-xs text-neutral-500 dark:text-white/50">
-        Line {result.line} · {result.stationHops} stop{result.stationHops === 1 ? "" : "s"}
-      </p>
+      {result.itinerary.length > 0 ? (
+        <ol className="mt-2 flex flex-col divide-y divide-neutral-200/70 dark:divide-white/10">
+          {result.itinerary
+            .filter((leg, index, legs) => isDisplayedLeg(leg, index, legs))
+            .map((leg, index) => {
+              const detail = formatItineraryLegDetail(leg);
+              return (
+                <li key={index} className="flex items-start gap-2 py-2 text-xs first:pt-0 last:pb-0">
+                  <span
+                    aria-hidden="true"
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-neutral-200 text-[11px] dark:bg-white/10"
+                  >
+                    {ITINERARY_MODE_ICONS[leg.mode]}
+                  </span>
+                  {/* min-w-0 lets this cell wrap onto a second line instead of
+                      forcing an ellipsis when the line is long (e.g. "Line 1
+                      Southbound to Vaughan Metropolitan Centre Station"). */}
+                  <span className="min-w-0 flex-1 font-semibold leading-snug break-words text-neutral-800 dark:text-white/90">
+                    {formatItineraryLegHeadline(leg)}
+                    {detail && (
+                      <span className="font-normal text-neutral-500 dark:text-white/50"> · {detail}</span>
+                    )}
+                  </span>
+                  <span className="shrink-0 whitespace-nowrap text-right text-neutral-400 dark:text-white/40">
+                    {formatMinutes(leg.durationMinutes)}
+                  </span>
+                </li>
+              );
+            })}
+        </ol>
+      ) : (
+        <p className="mt-2 text-xs text-neutral-500 dark:text-white/50">
+          Line {result.line} · {result.stationHops} stop{result.stationHops === 1 ? "" : "s"}
+        </p>
+      )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <span
@@ -147,6 +299,11 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
             }`}
           >
             +{formatMinutes(result.alertDelayMinutes)} Service Alert Delay
+          </span>
+        )}
+        {result.detourDelayMinutes > 0 && (
+          <span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700 dark:bg-red-500/15 dark:text-red-300">
+            +{formatMinutes(result.detourDelayMinutes)} Detour Delay
           </span>
         )}
         <p className="ml-auto text-xs text-neutral-500 dark:text-white/50">

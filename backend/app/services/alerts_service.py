@@ -131,6 +131,48 @@ def describe_nightly_window(description: str) -> Optional[str]:
     return f"Planned Nightly Closure: Starts at {raw_start_text.strip()}"
 
 
+_WEEKEND_KEYWORD_PATTERN = re.compile(r"\bthis weekend\b|\bsaturday\b|\bsunday\b", re.IGNORECASE)
+# Python's date.weekday(): Monday=0 ... Saturday=5, Sunday=6.
+_SATURDAY, _SUNDAY = 5, 6
+
+
+def is_within_weekend_window(description: str, moment: datetime) -> Optional[bool]:
+    """None if `description` doesn't explicitly mention "this weekend",
+    "Saturday", or "Sunday"; else whether `moment` falls on Saturday or
+    Sunday. A real TTC alert can describe a Saturday/Sunday-only closure
+    with an active_period spanning the whole surrounding week (see
+    detour_service.py), so — same as is_within_nightly_window — the raw
+    active-period range alone can't tell a weekday request that the
+    disruption doesn't actually apply to it."""
+    if not _WEEKEND_KEYWORD_PATTERN.search(description):
+        return None
+    return moment.weekday() in (_SATURDAY, _SUNDAY)
+
+
+def describe_weekend_window(description: str) -> Optional[str]:
+    """A short "informational notice" headline for a recognized
+    weekend-scoped closure."""
+    if not _WEEKEND_KEYWORD_PATTERN.search(description):
+        return None
+    return "Planned Weekend Closure"
+
+
+def is_within_recognized_window(description: str, moment: datetime) -> Optional[bool]:
+    """Combines the nightly and weekend day/time-window checks into the one
+    call sites actually need: None only if `description` matches neither
+    recognized pattern (i.e. it's genuinely active whenever its
+    active_period says so, not further day/time-scoped); else whether
+    `moment` falls inside whichever pattern it does match."""
+    nightly = is_within_nightly_window(description, moment)
+    if nightly is not None:
+        return nightly
+    return is_within_weekend_window(description, moment)
+
+
+def describe_recognized_window(description: str) -> Optional[str]:
+    return describe_nightly_window(description) or describe_weekend_window(description)
+
+
 def _classify(effect_desc: str, header_text: str, cause: str) -> str:
     """Categorize an alert as "closure", "delay", or "maintenance".
 
@@ -231,12 +273,12 @@ def _parse_alert(raw: dict) -> Optional[ServiceAlert]:
     is_advisory = _is_line_wide_advisory(description, line, affected_station_ids)
 
     # For the generic feed (no specific trip in mind), judge a closure's
-    # nightly window against the current moment — traffic_service.py
+    # nightly/weekend window against the current moment — traffic_service.py
     # re-judges this per-request against the rider's actual departure time.
     is_upcoming_notice = False
-    if category == "closure" and is_within_nightly_window(description, datetime.now()) is False:
+    if category == "closure" and is_within_recognized_window(description, datetime.now()) is False:
         is_upcoming_notice = True
-        notice_headline = describe_nightly_window(description)
+        notice_headline = describe_recognized_window(description)
         if notice_headline:
             headline = notice_headline
 

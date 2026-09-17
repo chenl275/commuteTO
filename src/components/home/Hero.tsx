@@ -1,20 +1,56 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import TTCMap from "@/components/map/TTCMap";
 import CommuteForm from "@/components/commute/CommuteForm";
+import type { LatLon, LocationSelection } from "@/lib/types";
 import type { TransitCommuteResponse } from "@/types/traffic";
 
 export default function Hero() {
   const [from, setFrom] = useState("");
   const [destination, setDestination] = useState("");
+  const [fromCoords, setFromCoords] = useState<LatLon | null>(null);
+  const [destinationCoords, setDestinationCoords] = useState<LatLon | null>(null);
   const [commuteResult, setCommuteResult] = useState<TransitCommuteResponse | null>(null);
+
+  function handleFromChange(value: string) {
+    setFrom(value);
+    setFromCoords(null);
+  }
+
+  function handleDestinationChange(value: string) {
+    setDestination(value);
+    setDestinationCoords(null);
+  }
+
+  // Stable across renders (empty deps, only calling stable setState setters)
+  // so passing these straight into TTCMap doesn't retrigger its map-creation
+  // effect — which would tear down and rebuild the whole WebGL map — every
+  // time the rider picks an origin/destination.
+  const handleFromSelect = useCallback((selection: LocationSelection) => {
+    setFrom(selection.name);
+    setFromCoords({ lat: selection.lat, lon: selection.lon });
+  }, []);
+
+  const handleDestinationSelect = useCallback((selection: LocationSelection) => {
+    setDestination(selection.name);
+    setDestinationCoords({ lat: selection.lat, lon: selection.lon });
+  }, []);
+
+  function handleSwap() {
+    setFrom(destination);
+    setDestination(from);
+    setFromCoords(destinationCoords);
+    setDestinationCoords(fromCoords);
+  }
 
   return (
     <section className="relative h-[85vh] min-h-[560px] w-full">
       <TTCMap
         className="absolute inset-0 h-full w-full"
-        onSelectDeparture={setFrom}
+        onSelectDeparture={handleFromSelect}
+        onSetOrigin={handleFromSelect}
+        onSetDestination={handleDestinationSelect}
         commuteResult={commuteResult}
       />
 
@@ -23,8 +59,13 @@ export default function Hero() {
           <CommuteForm
             from={from}
             destination={destination}
-            onFromChange={setFrom}
-            onDestinationChange={setDestination}
+            fromCoords={fromCoords}
+            destinationCoords={destinationCoords}
+            onFromChange={handleFromChange}
+            onDestinationChange={handleDestinationChange}
+            onFromSelect={handleFromSelect}
+            onDestinationSelect={handleDestinationSelect}
+            onSwap={handleSwap}
             onResult={setCommuteResult}
           />
         </div>

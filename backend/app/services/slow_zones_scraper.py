@@ -29,6 +29,17 @@ _LOCATION_PATTERN = re.compile(
     r"^(?P<direction>Northbound|Southbound|Eastbound|Westbound)\s+(?P<from>.+?)\s+to\s+(?P<to>.+)$",
     re.IGNORECASE,
 )
+# TTC appends a "(x2)"-style annotation to a station name when the same
+# defect stretch is listed more than once on the page — strip it before
+# station matching (and display), or e.g. "Rosedale (x2)" fails to resolve
+# to any station id at all (the parenthetical survives _normalize_key's
+# alphanumeric-only filter as literal "x2" text) and that zone silently
+# never renders on the map.
+_TRAILING_ANNOTATION_PATTERN = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _strip_annotation(name: str) -> str:
+    return _TRAILING_ANNOTATION_PATTERN.sub("", name).strip()
 
 
 @dataclass
@@ -73,43 +84,6 @@ class SlowZone:
         }
 
 
-def _fallback_zone(**overrides) -> dict:
-    zone = SlowZone(
-        line=1,
-        direction="Northbound",
-        from_station="TMU",
-        to_station="College",
-        defect_length_meters=250,
-        distance_between_stations_meters=500,
-        track_reduced_percent=50,
-        reduced_speed_kmh=15.0,
-        normal_speed_kmh=49.0,
-        reason="Track issue",
-        target_removal="TBD",
-    )
-    for key, value in overrides.items():
-        setattr(zone, key, value)
-    return zone.to_dict()
-
-
-# Minimal baseline used only when the live page can't be reached and there's
-# no prior cached data to fall back on.
-FALLBACK_SLOW_ZONES: list[dict] = [
-    _fallback_zone(),
-    _fallback_zone(
-        line=2,
-        direction="Eastbound",
-        from_station="Bay",
-        to_station="Bloor-Yonge",
-        defect_length_meters=170,
-        distance_between_stations_meters=480,
-        track_reduced_percent=35,
-        reduced_speed_kmh=25.0,
-        normal_speed_kmh=46.0,
-    ),
-]
-
-
 def _parse_int(text: str) -> Optional[int]:
     text = text.replace(",", "").strip()
     if not text:
@@ -152,8 +126,8 @@ def _parse_table(table, line: int) -> list[SlowZone]:
             SlowZone(
                 line=line,
                 direction=match.group("direction").title(),
-                from_station=match.group("from").strip(),
-                to_station=match.group("to").strip(),
+                from_station=_strip_annotation(match.group("from")),
+                to_station=_strip_annotation(match.group("to")),
                 defect_length_meters=defect_meters,
                 distance_between_stations_meters=_parse_int(distance),
                 track_reduced_percent=_parse_int(track_pct),
@@ -243,8 +217,13 @@ _cache = _SlowZoneCache(CACHE_TTL_SECONDS)
 async def get_slow_zones(force_refresh: bool = False) -> dict:
     """Return the cached (or freshly scraped) list of active TTC slow zones.
 
-    Falls back to the last good cached scrape if a fresh fetch fails, and
-    only drops to the minimal baseline JSON when there's no prior data at all.
+    Falls back to the last good cached scrape if a fresh fetch fails. If
+    there's no prior data at all, falls back to an empty list — a synthetic
+    "baseline" slow zone would claim a real, specific speed restriction
+    (e.g. a made-up 15-25 km/h crawl between two named stations) that isn't
+    actually in effect; the honest default when no real TSR data exists is
+    the standard line speed everywhere, i.e. no slow zones at all (same
+    principle alerts_service.py already applies to alerts).
     """
     if not force_refresh and _cache.is_fresh:
         return _cache.snapshot()
@@ -257,6 +236,6 @@ async def get_slow_zones(force_refresh: bool = False) -> dict:
         _cache.set([zone.to_dict() for zone in zones], last_updated, source="live")
     except (httpx.HTTPError, ValueError):
         if not _cache.has_data:
-            _cache.set(FALLBACK_SLOW_ZONES, None, source="fallback")
+            _cache.set([], None, source="fallback")
 
     return _cache.snapshot()
