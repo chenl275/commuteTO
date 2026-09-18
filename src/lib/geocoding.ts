@@ -10,11 +10,60 @@ const PHOTON_BASE_URL = "https://photon.komoot.io/api/";
 const PHOTON_REVERSE_URL = "https://photon.komoot.io/reverse";
 /** [longitude, latitude] center used to bias Photon's results toward Toronto. */
 const TORONTO_BIAS = { lat: 43.6532, lon: -79.3832 };
-/** min_lon,min_lat,max_lon,max_lat — the Greater Toronto Area. Photon's own
- * distance bias alone still lets a same-named US location (e.g. Buffalo)
- * outrank a real GTA match for a short/common query, so results are also
- * hard-bounded to this box. */
-const GTA_BBOX = "-79.64,43.58,-79.11,43.86";
+/** min_lon,min_lat,max_lon,max_lat — Toronto's own city limits (not the
+ * wider Greater Toronto Area, which would let a 905-region suggestion like
+ * Mississauga or Markham through — those aren't TTC destinations at all). */
+const TORONTO_BOUNDS = { minLon: -79.6393, minLat: 43.581, maxLon: -79.1158, maxLat: 43.8555 };
+const TORONTO_BBOX_PARAM = `${TORONTO_BOUNDS.minLon},${TORONTO_BOUNDS.minLat},${TORONTO_BOUNDS.maxLon},${TORONTO_BOUNDS.maxLat}`;
+
+/** True if `lat`/`lon` falls inside Toronto's city limits. Checked
+ * client-side in addition to Photon's own `bbox` query param — that param
+ * is a bias/filter hint to Photon's search, not a guarantee every result
+ * satisfies it (confirmed live: a "Square One" search still returns
+ * Mississauga hits even with this exact bbox applied), so a boundary-
+ * adjacent or mis-tagged result could otherwise slip through. */
+function isWithinToronto(lat: number, lon: number): boolean {
+  return (
+    lat >= TORONTO_BOUNDS.minLat &&
+    lat <= TORONTO_BOUNDS.maxLat &&
+    lon >= TORONTO_BOUNDS.minLon &&
+    lon <= TORONTO_BOUNDS.maxLon
+  );
+}
+
+/** Neighbouring 905-region municipalities right up against Toronto's own
+ * jagged border — a rectangular bbox can't exclude these on coordinates
+ * alone, since a point just across the line from Toronto can still fall
+ * inside the rectangle (e.g. a Mississauga address ~2km southwest of
+ * Toronto's western edge). None of these are served by the TTC. Toronto's
+ * own former boroughs (Scarborough, North York, Etobicoke, East York,
+ * York), amalgamated into the city in 1998, are deliberately not here. */
+const EXCLUDED_MUNICIPALITIES = new Set([
+  "mississauga",
+  "markham",
+  "vaughan",
+  "brampton",
+  "richmond hill",
+  "pickering",
+  "ajax",
+  "whitby",
+  "oshawa",
+  "oakville",
+  "burlington",
+  "milton",
+  "caledon",
+  "newmarket",
+  "aurora",
+  "stouffville",
+  "whitchurch-stouffville",
+  "halton hills",
+  "uxbridge",
+  "king",
+]);
+
+function isExcludedMunicipality(city: string | undefined): boolean {
+  return !!city && EXCLUDED_MUNICIPALITIES.has(city.trim().toLowerCase());
+}
 
 export interface GeocodeResult {
   id: string;
@@ -85,9 +134,10 @@ function toGeocodeResult(feature: PhotonFeature, index: number): GeocodeResult {
 
 /** Toronto-biased address/landmark search, debounced by the caller (see
  * StationAutocompleteField.tsx) — Photon has no built-in debounce of its own.
- * Hard-bounded to the GTA and filtered to Canadian results client-side, so a
- * same-named US location (Buffalo, NY for a "Main St" query, say) never
- * shows up as a Toronto commute endpoint. */
+ * Strictly bounded to Toronto's own city limits (never the wider GTA —
+ * Mississauga, Markham, etc. aren't TTC destinations) and filtered to
+ * Canadian results client-side, so a same-named US location (Buffalo, NY
+ * for a "Main St" query, say) never shows up as a commute endpoint. */
 export async function searchAddresses(
   query: string,
   signal?: AbortSignal
@@ -95,7 +145,7 @@ export async function searchAddresses(
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  const url = `${PHOTON_BASE_URL}?q=${encodeURIComponent(trimmed)}&lat=${TORONTO_BIAS.lat}&lon=${TORONTO_BIAS.lon}&limit=5&bbox=${GTA_BBOX}`;
+  const url = `${PHOTON_BASE_URL}?q=${encodeURIComponent(trimmed)}&lat=${TORONTO_BIAS.lat}&lon=${TORONTO_BIAS.lon}&limit=5&bbox=${TORONTO_BBOX_PARAM}`;
   const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(`Address search failed with status ${response.status}`);
@@ -103,7 +153,12 @@ export async function searchAddresses(
 
   const data = (await response.json()) as PhotonResponse;
   return (data.features ?? [])
-    .filter((feature) => feature.properties.countrycode === "CA")
+    .filter(
+      (feature) =>
+        feature.properties.countrycode === "CA" &&
+        isWithinToronto(feature.geometry.coordinates[1], feature.geometry.coordinates[0]) &&
+        !isExcludedMunicipality(feature.properties.city)
+    )
     .map(toGeocodeResult);
 }
 

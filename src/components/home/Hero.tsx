@@ -4,14 +4,17 @@ import { useCallback, useState } from "react";
 import TTCMap from "@/components/map/TTCMap";
 import CommuteForm from "@/components/commute/CommuteForm";
 import type { LatLon, LocationSelection } from "@/lib/types";
-import type { TransitCommuteResponse } from "@/types/traffic";
+import type { RouteSummary } from "@/types/traffic";
 
 export default function Hero() {
   const [from, setFrom] = useState("");
   const [destination, setDestination] = useState("");
   const [fromCoords, setFromCoords] = useState<LatLon | null>(null);
   const [destinationCoords, setDestinationCoords] = useState<LatLon | null>(null);
-  const [commuteResult, setCommuteResult] = useState<TransitCommuteResponse | null>(null);
+  // The route currently highlighted on TTCMap — the primary/fastest result
+  // by default, or whichever stacked alternative card the rider picked in
+  // CommuteResultCard (see onSelectRoute below).
+  const [highlightedRoute, setHighlightedRoute] = useState<RouteSummary | null>(null);
 
   function handleFromChange(value: string) {
     setFrom(value);
@@ -51,7 +54,7 @@ export default function Hero() {
         onSelectDeparture={handleFromSelect}
         onSetOrigin={handleFromSelect}
         onSetDestination={handleDestinationSelect}
-        commuteResult={commuteResult}
+        commuteResult={highlightedRoute}
       />
 
       <div className="pointer-events-none absolute inset-0">
@@ -66,7 +69,8 @@ export default function Hero() {
             onFromSelect={handleFromSelect}
             onDestinationSelect={handleDestinationSelect}
             onSwap={handleSwap}
-            onResult={setCommuteResult}
+            onResult={setHighlightedRoute}
+            onSelectRoute={setHighlightedRoute}
           />
         </div>
       </div>

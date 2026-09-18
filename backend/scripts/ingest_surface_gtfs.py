@@ -116,24 +116,52 @@ def _load_trips_for_routes(zf: zipfile.ZipFile, route_ids: set[str]) -> dict[str
     return trips
 
 
-def _pick_canonical_shapes(trips: dict[str, dict]) -> dict[tuple[str, str], str]:
-    """(route_id, direction_id) -> the shape_id used by the most trips.
+# A shape must back at least this share of a (route_id, direction_id)'s
+# trips to even be considered "canonical" — filters out a genuine one-off
+# (a garage pull-in/out, a single reroute), not a real, regularly-scheduled
+# pattern. See _pick_canonical_shapes below for why the *longest* shape
+# clearing this bar is picked, rather than simply the most-used one.
+CANONICAL_SHAPE_MIN_TRIP_SHARE = 0.10
 
-    A route typically has many shape variants (short-turns, garage
-    pull-ins/outs); the one backing the most trips is the dominant,
-    canonical end-to-end path.
+
+def _pick_canonical_shapes(
+    trips: dict[str, dict], shape_point_counts: dict[str, int]
+) -> dict[tuple[str, str], str]:
+    """(route_id, direction_id) -> the shape_id covering the full physical
+    corridor — not just whichever pattern happens to have the most
+    scheduled trips in this particular GTFS snapshot.
+
+    TTC frequently runs a temporary short-turn (construction, a detour,
+    reduced frequency on part of a route) that can outnumber the full
+    end-to-end pattern's trip count at the moment the feed was published —
+    e.g. 506 Carlton's short-turn to Spadina briefly had *more* trips
+    (507) than the full route to High Park (457), which under a plain
+    "most trips wins" rule rendered College St west of Spadina with stops
+    visible but no track line underneath, since that stretch was never in
+    the "winning" shape at all. Picking the shape with the most points
+    (shapes.txt rows — a reliable proxy for physical route length) among
+    only those clearing CANONICAL_SHAPE_MIN_TRIP_SHARE favours the full
+    corridor while still ignoring a rare, much-longer garage/pull-in
+    variant that only a handful of trips ever use.
     """
     counts: dict[tuple[str, str, str], int] = defaultdict(int)
     for trip in trips.values():
         counts[(trip["route_id"], trip["direction_id"], trip["shape_id"])] += 1
 
+    totals: dict[tuple[str, str], int] = defaultdict(int)
+    for (route_id, direction_id, _shape_id), count in counts.items():
+        totals[(route_id, direction_id)] += count
+
     best: dict[tuple[str, str], tuple[str, int]] = {}
     for (route_id, direction_id, shape_id), count in counts.items():
         key = (route_id, direction_id)
-        if key not in best or count > best[key][1]:
-            best[key] = (shape_id, count)
+        if count < totals[key] * CANONICAL_SHAPE_MIN_TRIP_SHARE:
+            continue
+        length = shape_point_counts.get(shape_id, 0)
+        if key not in best or length > best[key][1]:
+            best[key] = (shape_id, length)
 
-    return {key: shape_id for key, (shape_id, _count) in best.items()}
+    return {key: shape_id for key, (shape_id, _length) in best.items()}
 
 
 def _load_shape_geometries(
@@ -160,8 +188,18 @@ def _load_shape_geometries(
 def _build_route_feature_collection(
     zf: zipfile.ZipFile, routes: dict[str, dict], trips: dict[str, dict], default_color: str
 ) -> dict:
-    canonical_shapes = _pick_canonical_shapes(trips)
-    geometries = _load_shape_geometries(zf, set(canonical_shapes.values()))
+    # Every shape any of this network's trips could possibly use — a small
+    # set (~80 for the whole streetcar network), so loading all of them
+    # up front to measure length is cheap, and lets canonical selection
+    # weigh a candidate's actual physical length against its trip share
+    # (see _pick_canonical_shapes) instead of only ever seeing whichever
+    # one got fetched after the fact.
+    all_shape_ids = {trip["shape_id"] for trip in trips.values()}
+    all_geometries = _load_shape_geometries(zf, all_shape_ids)
+    shape_point_counts = {shape_id: len(points) for shape_id, points in all_geometries.items()}
+
+    canonical_shapes = _pick_canonical_shapes(trips, shape_point_counts)
+    geometries = all_geometries
 
     features = []
     for (route_id, direction_id), shape_id in sorted(canonical_shapes.items()):

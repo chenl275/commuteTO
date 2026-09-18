@@ -18,7 +18,7 @@ import { getTrafficEstimate } from "@/lib/traffic";
 import { getStationByNameOrId } from "@/lib/geo/subwayGeoJSON";
 import { searchAddresses } from "@/lib/geocoding";
 import type { DepartureMode, LatLon, LocationSelection } from "@/lib/types";
-import type { TransitCommuteResponse } from "@/types/traffic";
+import type { RouteSummary, TransitCommuteResponse } from "@/types/traffic";
 
 interface ResolvedEndpoint {
   text: string;
@@ -85,7 +85,10 @@ interface CommuteFormProps {
   /** Swaps from/destination (text and coordinates together) — owned by the
    * parent since it holds both pairs of state. */
   onSwap: () => void;
-  onResult?: (result: TransitCommuteResponse | null) => void;
+  onResult?: (result: RouteSummary | null) => void;
+  /** Fired when the rider picks a different stacked route card in the
+   * result — the newly selected route to re-highlight on TTCMap. */
+  onSelectRoute?: (route: RouteSummary) => void;
 }
 
 export default function CommuteForm({
@@ -99,6 +102,7 @@ export default function CommuteForm({
   onDestinationSelect,
   onSwap,
   onResult,
+  onSelectRoute,
 }: CommuteFormProps) {
   const [departureMode, setDepartureMode] = useState<DepartureMode>("now");
   const [date, setDate] = useState(getTodayISODate);
@@ -249,7 +253,9 @@ export default function CommuteForm({
         </p>
       )}
 
-      {result && <CommuteResultCard result={result} className="mt-4 animate-fade-in-up" />}
+      {result && (
+        <CommuteResultCard result={result} className="mt-4 animate-fade-in-up" onSelectRoute={onSelectRoute} />
+      )}
     </form>
   );
 }

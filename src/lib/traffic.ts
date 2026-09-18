@@ -2,6 +2,7 @@ import { BACKEND_URL } from "./constants";
 import type {
   ActiveSlowZone,
   AlertsResponse,
+  RouteSummary,
   SlowZonesResponse,
   SurfaceRoutesGeoJSON,
   SurfaceStopsGeoJSON,
@@ -9,8 +10,12 @@ import type {
   TransitCommuteResponse,
 } from "@/types/traffic";
 
-type RawTransitCommuteResponse = Omit<TransitCommuteResponse, "activeSlowZones"> & {
+type RawRouteSummary = Omit<RouteSummary, "activeSlowZones"> & {
   activeSlowZones: Omit<ActiveSlowZone, "id">[];
+};
+
+type RawTransitCommuteResponse = RawRouteSummary & {
+  alternativeRoutes: RawRouteSummary[];
 };
 
 function withZoneIds(zones: Omit<ActiveSlowZone, "id">[]): ActiveSlowZone[] {
@@ -18,6 +23,10 @@ function withZoneIds(zones: Omit<ActiveSlowZone, "id">[]): ActiveSlowZone[] {
     ...zone,
     id: `${zone.line}-${zone.fromStationId ?? zone.fromStation}-${zone.toStationId ?? zone.toStation}-${index}`,
   }));
+}
+
+function withRouteZoneIds(route: RawRouteSummary): RouteSummary {
+  return { ...route, activeSlowZones: withZoneIds(route.activeSlowZones) };
 }
 
 async function readErrorDetail(response: Response): Promise<string | null> {
@@ -40,7 +49,10 @@ export async function getTrafficEstimate(
   }
 
   const data = (await response.json()) as RawTransitCommuteResponse;
-  return { ...data, activeSlowZones: withZoneIds(data.activeSlowZones) };
+  return {
+    ...withRouteZoneIds(data),
+    alternativeRoutes: data.alternativeRoutes.map(withRouteZoneIds),
+  };
 }
 
 export async function getSlowZones(): Promise<SlowZonesResponse> {

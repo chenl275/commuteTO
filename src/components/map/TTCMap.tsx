@@ -16,7 +16,7 @@ import { getAlerts, getNightBuses, getSlowZones, getStreetcars, getSurfaceStops 
 import { reverseGeocode } from "@/lib/geocoding";
 import { formatStationLabel } from "@/lib/stationDisplay";
 import type { LocationSelection } from "@/lib/types";
-import type { TransitCommuteResponse } from "@/types/traffic";
+import type { RouteSummary } from "@/types/traffic";
 
 interface TTCMapProps {
   className?: string;
@@ -28,7 +28,7 @@ interface TTCMapProps {
   /** Same as `onSetOrigin`, for "Set as Destination". */
   onSetDestination?: (selection: LocationSelection) => void;
   /** The most recently calculated commute, used to glow the route + fit the map to it. */
-  commuteResult?: TransitCommuteResponse | null;
+  commuteResult?: RouteSummary | null;
 }
 
 // maplibre-gl's worker script imports a sibling chunk via a relative path;
@@ -725,7 +725,7 @@ function addEndpointHighlightLayers(map: maplibregl.Map, data: GeoJSON.FeatureCo
   }
 }
 
-function itineraryLegColor(leg: TransitCommuteResponse["itinerary"][number]): string {
+function itineraryLegColor(leg: RouteSummary["itinerary"][number]): string {
   if (leg.mode === "subway") {
     return (leg.routeShortName && SUBWAY_LINE_COLORS[leg.routeShortName]) || "#ffffff";
   }
@@ -749,7 +749,7 @@ function snapToStationCoordinate(name: string, fallback: [number, number]): [num
  * dots, from a router.py itinerary's actual leg coordinates — snapped onto
  * the canonical station coordinate at either end when that leg's endpoint
  * names a known station (see snapToStationCoordinate above). */
-function computeItineraryFeatures(result: TransitCommuteResponse | null): {
+function computeItineraryFeatures(result: RouteSummary | null): {
   itinerary: GeoJSON.FeatureCollection;
   endpoints: GeoJSON.FeatureCollection;
   bounds: maplibregl.LngLatBounds | null;
@@ -815,7 +815,7 @@ function computeItineraryFeatures(result: TransitCommuteResponse | null): {
   return { itinerary: { type: "FeatureCollection", features }, endpoints, bounds };
 }
 
-function computeRouteFeatures(result: TransitCommuteResponse | null): {
+function computeRouteFeatures(result: RouteSummary | null): {
   route: GeoJSON.FeatureCollection;
   endpoints: GeoJSON.FeatureCollection;
   bounds: maplibregl.LngLatBounds | null;

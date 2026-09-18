@@ -143,7 +143,14 @@ export interface ItineraryLeg {
   path: Coordinates[];
 }
 
-export interface TransitCommuteResponse {
+/** Everything needed to render and highlight one route option — shared by
+ * TransitCommuteResponse's own top-level fields (the primary/fastest route)
+ * and each entry in its alternativeRoutes, so a stacked route card can
+ * render either one identically. */
+export interface RouteSummary {
+  /** "Fastest" for the primary route, "Alternative" for anything in
+   * alternativeRoutes — see traffic_service.py's multi-route search. */
+  label: string;
   origin: string;
   destination: string;
   line: number;
@@ -153,6 +160,15 @@ export interface TransitCommuteResponse {
   slowZoneDelaySeconds: number;
   /** Whether slowZoneDelay* came from live train transponder data or the kinematic fallback model. */
   telemetrySource: TelemetrySource;
+  /** Live-observed (GTFS-RT TripUpdates) or, absent that, detour-estimated
+   * delay on a streetcar/bus leg of this route. A subset of
+   * slowZoneDelay* above (already reflected in totalDurationMinutes),
+   * broken out so the UI can badge it distinctly ("Streetcar Delay"/
+   * "Traffic Delay") instead of folding it into the subway-oriented "Track
+   * Slowdown" badge. 0 for the subway-only fast path, or when no surface
+   * leg is delayed. */
+  streetcarDelayMinutes: number;
+  busDelayMinutes: number;
   alertDelayMinutes: number;
   /** Added ETA penalty from active GTFS-RT detour/construction/shuttle alerts on this trip's routes. */
   detourDelayMinutes: number;
@@ -173,4 +189,11 @@ export interface TransitCommuteResponse {
   departureTime: string;
   arrivalTime: string;
   source: TransitSource;
+}
+
+export interface TransitCommuteResponse extends RouteSummary {
+  /** Up to one genuinely different, real alternative route (see router.py's
+   * find_itineraries) — empty when no competitive alternative exists, or
+   * for the subway-only fast path, which doesn't search for one. */
+  alternativeRoutes: RouteSummary[];
 }

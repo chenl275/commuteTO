@@ -30,6 +30,7 @@ from typing import Optional, Tuple
 from . import gtfs_service, stations
 from .detour_service import get_detours_for_routes
 from .slow_zones_scraper import get_slow_zones
+from . import surface_realtime_service
 
 _DB_PATH = Path(__file__).resolve().parents[1] / "data" / "gtfs_routing.db"
 
@@ -145,6 +146,14 @@ class Itinerary:
     # already reflected in their arrival_sec/duration — kept separately so
     # callers can still report a scheduled-vs-actual breakdown.
     delay_seconds: float = 0.0
+    # The worst single live-observed delay (see surface_realtime_service)
+    # found on a streetcar leg, and separately a bus leg, of this
+    # itinerary — a subset of delay_seconds above, broken out so the UI can
+    # label a surface delay distinctly ("Streetcar Delay"/"Traffic Delay")
+    # instead of folding it into the subway-oriented "Track Slowdown" badge.
+    # 0.0 when no leg of that mode has a live delay reading.
+    streetcar_delay_seconds: float = 0.0
+    bus_delay_seconds: float = 0.0
 
 
 def _bbox(lat: float, lon: float, radius_m: float) -> Tuple[float, float, float, float]:
@@ -414,7 +423,18 @@ def _run_dijkstra(
     destination_lon: float,
     departure_sec: float,
     on_date: date,
+    penalized_route_ids: Optional[set[str]] = None,
+    penalty_multiplier: float = 1.0,
 ) -> Optional[list[_Edge]]:
+    """`penalized_route_ids`/`penalty_multiplier` bias the search away from
+    reusing those routes, without distorting the *real* schedule times
+    stored on the returned edges: a separate `priority` value (search-order
+    only) is inflated for a penalized route's edges, while `dist` — and
+    every _Edge's depart_sec/arrive_sec — always stays the genuine
+    GTFS-scheduled time. Used by find_itineraries to search for a second,
+    genuinely different itinerary after the unpenalized primary search
+    already found the fastest one, whose displayed duration must still be
+    real, not inflated by the very penalty used to find it."""
     active_service_ids = _active_service_ids(conn, on_date)
 
     origin_stops = _nearby_stops(conn, origin_lat, origin_lon, MAX_INITIAL_WALK_METERS)[:MAX_NEARBY_STOP_CANDIDATES]
@@ -426,37 +446,45 @@ def _run_dijkstra(
     }
 
     dist: dict[str, float] = {_ORIGIN_NODE: departure_sec}
+    priority: dict[str, float] = {_ORIGIN_NODE: departure_sec}
     prev: dict[str, _Edge] = {}
     arrived_via: dict[str, str] = {_ORIGIN_NODE: "origin"}
     settled: set[str] = set()
     heap: list[tuple[float, str]] = [(departure_sec, _ORIGIN_NODE)]
 
+    def relax(from_node: str, to_node: str, real_arrival: float, edge: _Edge, via: str) -> None:
+        cost = real_arrival - dist[from_node]
+        if penalized_route_ids and edge.route_id in penalized_route_ids:
+            cost *= penalty_multiplier
+        candidate_priority = priority[from_node] + cost
+        if candidate_priority < priority.get(to_node, math.inf):
+            dist[to_node] = real_arrival
+            priority[to_node] = candidate_priority
+            arrived_via[to_node] = via
+            prev[to_node] = edge
+            heapq.heappush(heap, (candidate_priority, to_node))
+
     # Direct walk, bypassing transit entirely, for a short origin-destination hop.
     direct_distance = _haversine_m(origin_lat, origin_lon, destination_lat, destination_lon)
     if direct_distance <= MAX_INITIAL_WALK_METERS * 2:
         arrive = departure_sec + _walk_minutes(direct_distance) * 60
-        dist[_DESTINATION_NODE] = arrive
-        prev[_DESTINATION_NODE] = _Edge(
-            "walk", _ORIGIN_NODE, _DESTINATION_NODE, departure_sec, arrive, distance_meters=direct_distance
-        )
-        heapq.heappush(heap, (arrive, _DESTINATION_NODE))
+        edge = _Edge("walk", _ORIGIN_NODE, _DESTINATION_NODE, departure_sec, arrive, distance_meters=direct_distance)
+        relax(_ORIGIN_NODE, _DESTINATION_NODE, arrive, edge, "origin")
 
     for stop_id, _name, _lat, _lon, distance in origin_stops:
         arrive = departure_sec + _walk_minutes(distance) * 60
-        if arrive < dist.get(stop_id, math.inf):
-            dist[stop_id] = arrive
-            arrived_via[stop_id] = "walk"
-            prev[stop_id] = _Edge("walk", _ORIGIN_NODE, stop_id, departure_sec, arrive, distance_meters=distance)
-            heapq.heappush(heap, (arrive, stop_id))
+        edge = _Edge("walk", _ORIGIN_NODE, stop_id, departure_sec, arrive, distance_meters=distance)
+        relax(_ORIGIN_NODE, stop_id, arrive, edge, "walk")
 
     horizon_sec = departure_sec + SEARCH_HORIZON_MINUTES * 60
     settled_count = 0
 
     while heap:
-        arrival_sec, node = heapq.heappop(heap)
-        if node in settled or arrival_sec > dist.get(node, math.inf) + 1e-6:
+        _priority_value, node = heapq.heappop(heap)
+        if node in settled:
             continue
         settled.add(node)
+        arrival_sec = dist[node]
 
         if node == _DESTINATION_NODE:
             return _reconstruct(prev, _DESTINATION_NODE)
@@ -469,12 +497,8 @@ def _run_dijkstra(
         if walk_to_destination is not None:
             walk_seconds, distance = walk_to_destination
             arrive = arrival_sec + walk_seconds
-            if arrive < dist.get(_DESTINATION_NODE, math.inf):
-                dist[_DESTINATION_NODE] = arrive
-                prev[_DESTINATION_NODE] = _Edge(
-                    "walk", node, _DESTINATION_NODE, arrival_sec, arrive, distance_meters=distance
-                )
-                heapq.heappush(heap, (arrive, _DESTINATION_NODE))
+            edge = _Edge("walk", node, _DESTINATION_NODE, arrival_sec, arrive, distance_meters=distance)
+            relax(node, _DESTINATION_NODE, arrive, edge, "walk")
 
         route_ids = _route_ids_at_stop(conn, node)
         board_after = arrival_sec + (TRANSFER_BUFFER_SECONDS if arrived_via.get(node) == "transit" else 0)
@@ -482,21 +506,18 @@ def _run_dijkstra(
         for route_id, (trip_id, departure, from_sequence) in boardings.items():
             for to_stop_id, arrival, to_sequence in _trip_fanout(conn, trip_id, from_sequence):
                 candidate_arrival = float(arrival)
-                if candidate_arrival < dist.get(to_stop_id, math.inf):
-                    dist[to_stop_id] = candidate_arrival
-                    arrived_via[to_stop_id] = "transit"
-                    prev[to_stop_id] = _Edge(
-                        "transit",
-                        node,
-                        to_stop_id,
-                        float(departure),
-                        candidate_arrival,
-                        route_id=route_id,
-                        trip_id=trip_id,
-                        from_stop_sequence=from_sequence,
-                        to_stop_sequence=to_sequence,
-                    )
-                    heapq.heappush(heap, (candidate_arrival, to_stop_id))
+                edge = _Edge(
+                    "transit",
+                    node,
+                    to_stop_id,
+                    float(departure),
+                    candidate_arrival,
+                    route_id=route_id,
+                    trip_id=trip_id,
+                    from_stop_sequence=from_sequence,
+                    to_stop_sequence=to_sequence,
+                )
+                relax(node, to_stop_id, candidate_arrival, edge, "transit")
 
         # Short walking transfers to other nearby stops — only from a stop
         # reached by transit; walk-to-walk chaining never helps, since
@@ -511,11 +532,8 @@ def _run_dijkstra(
             # and get missed entirely.
             for to_stop_id, _n, _la, _lo in _sibling_platforms(conn, node):
                 arrive = arrival_sec + SAME_STATION_TRANSFER_SECONDS
-                if arrive < dist.get(to_stop_id, math.inf):
-                    dist[to_stop_id] = arrive
-                    arrived_via[to_stop_id] = "walk"
-                    prev[to_stop_id] = _Edge("walk", node, to_stop_id, arrival_sec, arrive, distance_meters=0.0)
-                    heapq.heappush(heap, (arrive, to_stop_id))
+                edge = _Edge("walk", node, to_stop_id, arrival_sec, arrive, distance_meters=0.0)
+                relax(node, to_stop_id, arrive, edge, "walk")
 
             row = conn.execute("SELECT lat, lon FROM stops WHERE stop_id = ?", (node,)).fetchone()
             if row:
@@ -524,13 +542,8 @@ def _run_dijkstra(
                     conn, node_lat, node_lon, MAX_TRANSFER_WALK_METERS, exclude_stop_id=node
                 )[:MAX_TRANSFER_CANDIDATES]:
                     arrive = arrival_sec + _walk_minutes(distance) * 60
-                    if arrive < dist.get(to_stop_id, math.inf):
-                        dist[to_stop_id] = arrive
-                        arrived_via[to_stop_id] = "walk"
-                        prev[to_stop_id] = _Edge(
-                            "walk", node, to_stop_id, arrival_sec, arrive, distance_meters=distance
-                        )
-                        heapq.heappush(heap, (arrive, to_stop_id))
+                    edge = _Edge("walk", node, to_stop_id, arrival_sec, arrive, distance_meters=distance)
+                    relax(node, to_stop_id, arrive, edge, "walk")
 
     return None
 
@@ -629,18 +642,24 @@ def _build_itinerary(
     )
 
 
-async def _augment_with_live_delays(itinerary: Itinerary) -> float:
+async def _augment_with_live_delays(itinerary: Itinerary) -> Tuple[float, float, float]:
     """Mutates `itinerary`'s legs in place: adds subway kinematic/live delay
-    and surface (streetcar/bus) detour delay onto whichever legs they apply
-    to, shifting every later leg's times by the same cumulative amount — the
-    same modeling traffic_service.py applies to a subway-only trip, reused
-    here per-leg for a general multi-modal itinerary. Returns the total delay
-    seconds added."""
+    and surface (streetcar/bus) live/detour delay onto whichever legs they
+    apply to, shifting every later leg's times by the same cumulative
+    amount — the same modeling traffic_service.py applies to a subway-only
+    trip, reused here per-leg for a general multi-modal itinerary. Returns
+    (total delay seconds added, worst single streetcar-leg delay, worst
+    single bus-leg delay) — the latter two are a subset of the total, kept
+    separate so callers can label a surface delay distinctly ("Streetcar
+    Delay"/"Traffic Delay") instead of folding it into the subway-oriented
+    "Track Slowdown" badge."""
     if not itinerary.legs:
-        return 0.0
+        return 0.0, 0.0, 0.0
 
     cumulative_shift = 0.0
     total_added = 0.0
+    streetcar_worst = 0.0
+    bus_worst = 0.0
     slow_zones_cache: Optional[dict] = None
 
     for leg in itinerary.legs:
@@ -667,17 +686,136 @@ async def _augment_with_live_delays(itinerary: Itinerary) -> float:
                         live_seconds = observed
                 added_seconds = float(live_seconds) if live_seconds > 0 else kinematic_seconds
         elif leg.mode in ("streetcar", "bus") and leg.route_short_name:
-            detours = await get_detours_for_routes({leg.route_short_name})
-            active_penalties = [d["penaltyMinutes"] for d in detours if not d["isFuture"]]
-            if active_penalties:
-                added_seconds = max(active_penalties) * 60
+            # Live TripUpdates (real vehicles genuinely running behind, e.g.
+            # traffic) takes priority over the detour feed's flat estimate,
+            # same "live observed beats modeled" precedent as subway above —
+            # only falls back to the detour penalty when this leg's route
+            # has no usable live reading right now.
+            leg_stop_ids = [stop_id for stop_id in (leg.from_stop_id, leg.to_stop_id) if stop_id]
+            live_seconds = (
+                await surface_realtime_service.get_route_delay_seconds(leg.route_short_name, leg_stop_ids)
+                if leg_stop_ids
+                else None
+            )
+            if live_seconds is not None and live_seconds > 0:
+                added_seconds = float(live_seconds)
+            else:
+                detours = await get_detours_for_routes({leg.route_short_name})
+                active_penalties = [d["penaltyMinutes"] for d in detours if not d["isFuture"]]
+                if active_penalties:
+                    added_seconds = max(active_penalties) * 60
+
+            if leg.mode == "streetcar":
+                streetcar_worst = max(streetcar_worst, added_seconds)
+            else:
+                bus_worst = max(bus_worst, added_seconds)
 
         if added_seconds > 0:
             leg.arrival_sec += added_seconds
             cumulative_shift += added_seconds
             total_added += added_seconds
 
-    return total_added
+    return total_added, streetcar_worst, bus_worst
+
+
+# How much more expensive a penalized route's edges look to the alternative
+# search (see find_itineraries) than they really are — big enough to make a
+# competitive different route win out, small enough that the search doesn't
+# reach for something absurd when the primary's routes are genuinely the
+# only reasonable way to make the trip.
+ALTERNATIVE_ROUTE_PENALTY_MULTIPLIER = 1.5
+
+
+def _transit_route_signature(edges: list[_Edge]) -> tuple:
+    """The sequence of actual trips ridden (ignoring walk edges) — two
+    itineraries with this in common are the same real route, even if the
+    walk legs bracketing them differ slightly."""
+    return tuple((edge.trip_id, edge.from_stop_sequence, edge.to_stop_sequence) for edge in edges if edge.kind == "transit")
+
+
+async def find_itineraries(
+    origin: Tuple[float, float],
+    destination: Tuple[float, float],
+    departure: datetime,
+    origin_name: str = "Origin",
+    destination_name: str = "Destination",
+    max_alternatives: int = 0,
+) -> list[Itinerary]:
+    """Like find_itinerary, but can also search for up to `max_alternatives`
+    genuinely different itineraries — a route using different lines/trips
+    than the primary, found via penalized Dijkstra on the primary's own
+    routes (see _run_dijkstra's penalized_route_ids) rather than a full
+    Yen's-algorithm k-shortest-paths search, which would need re-running the
+    whole search once per *excluded edge* rather than just once more. The
+    penalty only biases which path the alternative search settles on; its
+    returned itinerary's actual times are always the real GTFS schedule (see
+    _run_dijkstra's own docstring), so its displayed duration is honest, not
+    inflated by 1.5x. Returns just [primary] when no genuinely different
+    alternative exists (the penalized search finds the exact same trips
+    again, or no path at all). Empty list if not even the primary connects.
+    """
+    origin_lat, origin_lon = origin
+    destination_lat, destination_lon = destination
+    departure_sec = departure.hour * 3600 + departure.minute * 60 + departure.second
+
+    def _search() -> list[Itinerary]:
+        conn = _get_connection()
+        try:
+            primary_edges = _run_dijkstra(
+                conn, origin_lat, origin_lon, destination_lat, destination_lon, departure_sec, departure.date()
+            )
+            if primary_edges is None:
+                return []
+
+            edge_lists = [primary_edges]
+            primary_route_ids = {edge.route_id for edge in primary_edges if edge.kind == "transit" and edge.route_id}
+            if primary_route_ids and max_alternatives > 0:
+                alternative_edges = _run_dijkstra(
+                    conn,
+                    origin_lat,
+                    origin_lon,
+                    destination_lat,
+                    destination_lon,
+                    departure_sec,
+                    departure.date(),
+                    penalized_route_ids=primary_route_ids,
+                    penalty_multiplier=ALTERNATIVE_ROUTE_PENALTY_MULTIPLIER,
+                )
+                if alternative_edges is not None and _transit_route_signature(
+                    alternative_edges
+                ) != _transit_route_signature(primary_edges):
+                    edge_lists.append(alternative_edges)
+
+            return [
+                _build_itinerary(
+                    conn,
+                    edges,
+                    (origin_lon, origin_lat),
+                    (destination_lon, destination_lat),
+                    origin_name,
+                    destination_name,
+                )
+                for edges in edge_lists
+            ]
+        finally:
+            conn.close()
+
+    itineraries = await asyncio.to_thread(_search)
+
+    for itinerary in itineraries:
+        (
+            itinerary.delay_seconds,
+            itinerary.streetcar_delay_seconds,
+            itinerary.bus_delay_seconds,
+        ) = await _augment_with_live_delays(itinerary)
+        itinerary.arrival_sec = itinerary.legs[-1].arrival_sec if itinerary.legs else itinerary.arrival_sec
+
+    # Fastest first by real total duration — the penalized search sometimes
+    # still finds a "different but slower" alternative when nothing
+    # competitive really exists, and a rider expects option order to track
+    # actual speed, not which search found it.
+    itineraries.sort(key=lambda itinerary: itinerary.arrival_sec - itinerary.departure_sec)
+    return itineraries
 
 
 async def find_itinerary(
@@ -689,33 +827,5 @@ async def find_itinerary(
 ) -> Optional[Itinerary]:
     """origin/destination are (lat, lon). Returns None if no walk+transit
     path connects them within the search horizon (SEARCH_HORIZON_MINUTES)."""
-    origin_lat, origin_lon = origin
-    destination_lat, destination_lon = destination
-    departure_sec = departure.hour * 3600 + departure.minute * 60 + departure.second
-
-    def _search() -> Optional[Itinerary]:
-        conn = _get_connection()
-        try:
-            edges = _run_dijkstra(
-                conn, origin_lat, origin_lon, destination_lat, destination_lon, departure_sec, departure.date()
-            )
-            if edges is None:
-                return None
-            return _build_itinerary(
-                conn,
-                edges,
-                (origin_lon, origin_lat),
-                (destination_lon, destination_lat),
-                origin_name,
-                destination_name,
-            )
-        finally:
-            conn.close()
-
-    itinerary = await asyncio.to_thread(_search)
-    if itinerary is None:
-        return None
-
-    itinerary.delay_seconds = await _augment_with_live_delays(itinerary)
-    itinerary.arrival_sec = itinerary.legs[-1].arrival_sec if itinerary.legs else itinerary.arrival_sec
-    return itinerary
+    itineraries = await find_itineraries(origin, destination, departure, origin_name, destination_name)
+    return itineraries[0] if itineraries else None

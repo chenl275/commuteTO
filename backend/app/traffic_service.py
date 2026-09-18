@@ -8,6 +8,7 @@ from .schemas import (
     ActiveSlowZone,
     CommuteStep,
     ItineraryLeg,
+    RouteSummary,
     ServiceAlert,
     TransitCommuteRequest,
     TransitCommuteResponse,
@@ -249,41 +250,12 @@ def _trim_micro_walks(legs: list) -> list:
     return legs[start:end]
 
 
-async def _get_multimodal_estimate(
-    origin_station: dict,
-    destination_station: dict,
-    departure: datetime,
-    origin_point: Optional[Tuple[float, float]],
-    destination_point: Optional[Tuple[float, float]],
-    origin_display: str,
-    destination_display: str,
-) -> Optional[TransitCommuteResponse]:
-    """Walk -> transit -> ... -> walk itinerary via router.py's time-dependent
-    Dijkstra over the full GTFS network — the fallback whenever the origin
-    and destination don't share a modeled subway line (see router.py), and
-    always the path taken when the request supplied real coordinates for
-    either endpoint (a geocoded address or a map-dropped pin), since only
-    this path actually models the walk leg from that exact point rather than
-    assuming the rider starts right at a station platform. Uses the request's
-    actual (lat, lon) when it supplied coordinates directly, rather than the
-    resolved station's coordinates, so the initial/final walk legs reflect
-    where the rider actually is."""
-    origin_lat, origin_lon = origin_point if origin_point is not None else tuple(reversed(origin_station["coordinates"]))
-    destination_lat, destination_lon = (
-        destination_point if destination_point is not None else tuple(reversed(destination_station["coordinates"]))
-    )
-
-    itinerary = await router.find_itinerary(
-        origin=(origin_lat, origin_lon),
-        destination=(destination_lat, destination_lon),
-        departure=departure,
-        origin_name=origin_display,
-        destination_name=destination_display,
-    )
-    if itinerary is None or not itinerary.legs:
-        return None
-
-    base_date = departure.date()
+def _build_route_summary_fields(itinerary, base_date, label: str) -> dict:
+    """Every RouteSummary field derivable from one router.py Itinerary,
+    keyed by python (snake_case) field name — shared by the primary route
+    and each alternative in _get_multimodal_estimate, so both render
+    identically. Caller still fills in origin/destination/active_slow_zones/
+    is_disrupted/active_alerts_on_route, which aren't itinerary-derived."""
     steps: list[CommuteStep] = []
     itinerary_legs: list[ItineraryLeg] = []
     total_stop_count = 0
@@ -324,25 +296,83 @@ async def _get_multimodal_estimate(
     delay_minutes = itinerary.delay_seconds / 60.0
     scheduled_minutes = total_minutes - delay_minutes
 
+    return {
+        "label": label,
+        "line": primary_line,
+        "station_hops": total_stop_count,
+        "scheduled_duration_minutes": round(scheduled_minutes, 1),
+        "slow_zone_delay_minutes": round(delay_minutes, 1),
+        "slow_zone_delay_seconds": round(itinerary.delay_seconds, 1),
+        "telemetry_source": "kinematic_model",
+        "streetcar_delay_minutes": round(itinerary.streetcar_delay_seconds / 60.0, 1),
+        "bus_delay_minutes": round(itinerary.bus_delay_seconds / 60.0, 1),
+        "alert_delay_minutes": 0.0,
+        "total_duration_minutes": round(total_minutes, 1),
+        "steps": steps,
+        "itinerary": itinerary_legs,
+        "departure_time": _to_clock_time(base_date, first_leg.departure_sec).isoformat(),
+        "arrival_time": _to_clock_time(base_date, last_leg.arrival_sec).isoformat(),
+        "source": "live",
+    }
+
+
+async def _get_multimodal_estimate(
+    origin_station: dict,
+    destination_station: dict,
+    departure: datetime,
+    origin_point: Optional[Tuple[float, float]],
+    destination_point: Optional[Tuple[float, float]],
+    origin_display: str,
+    destination_display: str,
+) -> Optional[TransitCommuteResponse]:
+    """Walk -> transit -> ... -> walk itinerary via router.py's time-dependent
+    Dijkstra over the full GTFS network — the fallback whenever the origin
+    and destination don't share a modeled subway line (see router.py), and
+    always the path taken when the request supplied real coordinates for
+    either endpoint (a geocoded address or a map-dropped pin), since only
+    this path actually models the walk leg from that exact point rather than
+    assuming the rider starts right at a station platform. Uses the request's
+    actual (lat, lon) when it supplied coordinates directly, rather than the
+    resolved station's coordinates, so the initial/final walk legs reflect
+    where the rider actually is.
+
+    Also searches for one genuinely different, real alternative route (see
+    router.py's find_itineraries) — populated as alternative_routes[0] when
+    one exists, alongside this function's own (fastest/primary) result."""
+    origin_lat, origin_lon = origin_point if origin_point is not None else tuple(reversed(origin_station["coordinates"]))
+    destination_lat, destination_lon = (
+        destination_point if destination_point is not None else tuple(reversed(destination_station["coordinates"]))
+    )
+
+    itineraries = await router.find_itineraries(
+        origin=(origin_lat, origin_lon),
+        destination=(destination_lat, destination_lon),
+        departure=departure,
+        origin_name=origin_display,
+        destination_name=destination_display,
+        max_alternatives=1,
+    )
+    if not itineraries or not itineraries[0].legs:
+        return None
+
+    base_date = departure.date()
+    primary_fields = _build_route_summary_fields(itineraries[0], base_date, "Fastest")
+
+    alternative_routes: list[RouteSummary] = []
+    if len(itineraries) > 1 and itineraries[1].legs:
+        alternative_fields = _build_route_summary_fields(itineraries[1], base_date, "Alternative")
+        alternative_routes.append(
+            RouteSummary(origin=origin_display, destination=destination_display, **alternative_fields)
+        )
+
     return TransitCommuteResponse(
         origin=origin_display,
         destination=destination_display,
-        line=primary_line,
-        station_hops=total_stop_count,
-        scheduled_duration_minutes=round(scheduled_minutes, 1),
-        slow_zone_delay_minutes=round(delay_minutes, 1),
-        slow_zone_delay_seconds=round(itinerary.delay_seconds, 1),
-        telemetry_source="kinematic_model",
-        alert_delay_minutes=0.0,
-        total_duration_minutes=round(total_minutes, 1),
         active_slow_zones=[],
         is_disrupted=False,
         active_alerts_on_route=[],
-        steps=steps,
-        itinerary=itinerary_legs,
-        departure_time=_to_clock_time(base_date, first_leg.departure_sec).isoformat(),
-        arrival_time=_to_clock_time(base_date, last_leg.arrival_sec).isoformat(),
-        source="live",
+        alternative_routes=alternative_routes,
+        **primary_fields,
     )
 
 

@@ -4293,8 +4293,8 @@
     "routes": [
       "329"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "wilson"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "11879",
@@ -4309,8 +4309,8 @@
     "routes": [
       "329"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "wilson"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "119",
@@ -4806,8 +4806,8 @@
     "routes": [
       "384"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "sheppard-yonge"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "12193",
@@ -8098,8 +8098,8 @@
     "routes": [
       "512"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "st-clair-west"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "14344",
@@ -9015,8 +9015,8 @@
     "routes": [
       "325"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "don-mills"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "14639",
@@ -9256,8 +9256,8 @@
     "routes": [
       "336"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "finch"
   },
   {
     "id": "147",
@@ -10127,8 +10127,8 @@
     "routes": [
       "320"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "finch"
   },
   {
     "id": "14956",
@@ -11416,8 +11416,8 @@
     "routes": [
       "320"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "finch"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "153",
@@ -11448,8 +11448,8 @@
     "routes": [
       "512"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "st-clair"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "15308",
@@ -12668,8 +12668,8 @@
     "routes": [
       "300"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "st-george"
   },
   {
     "id": "15528",
@@ -12930,8 +12930,8 @@
       "503",
       "504"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "king"
   },
   {
     "id": "15641",
@@ -13590,8 +13590,8 @@
     "routes": [
       "503"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "st-andrew"
   },
   {
     "id": "15827",
@@ -16185,8 +16185,8 @@
     "routes": [
       "501"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "king"
   },
   {
     "id": "1658",
@@ -29472,8 +29472,8 @@
     "routes": [
       "320"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "tmu"
   },
   {
     "id": "3238",
@@ -38117,8 +38117,8 @@
     "routes": [
       "512"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "st-clair-west"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "4640",
@@ -39019,8 +39019,8 @@
     "routes": [
       "300"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "st-george"
   },
   {
     "id": "4950",
@@ -42289,8 +42289,8 @@
     "routes": [
       "352"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "lawrence"
   },
   {
     "id": "5356",
@@ -50007,8 +50007,8 @@
     "routes": [
       "385"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "don-mills"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "7228",
@@ -53664,8 +53664,8 @@
     "routes": [
       "385"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "sheppard-yonge"
   },
   {
     "id": "811",
@@ -59848,8 +59848,8 @@
     "routes": [
       "300"
     ],
-    "isInterchange": true,
-    "interchangeStationId": "coxwell"
+    "isInterchange": false,
+    "interchangeStationId": null
   },
   {
     "id": "895",
@@ -60312,8 +60312,8 @@
     "routes": [
       "320"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "finch"
   },
   {
     "id": "8989",
@@ -60328,8 +60328,8 @@
     "routes": [
       "320"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "finch"
   },
   {
     "id": "899",
@@ -61611,8 +61611,8 @@
       "336",
       "339"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "finch"
   },
   {
     "id": "9131",
@@ -64533,8 +64533,8 @@
       "336",
       "339"
     ],
-    "isInterchange": false,
-    "interchangeStationId": null
+    "isInterchange": true,
+    "interchangeStationId": "finch"
   },
   {
     "id": "9919",

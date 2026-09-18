@@ -112,9 +112,17 @@ class ItineraryLeg(BaseModel):
     path: list[Coordinates] = Field(default_factory=list)
 
 
-class TransitCommuteResponse(BaseModel):
+class RouteSummary(BaseModel):
+    """Everything needed to render and highlight one route option — shared
+    by the primary result and each entry in TransitCommuteResponse's
+    alternative_routes, so a stacked "Fastest"/"Alternative" card in the UI
+    can render either one identically."""
+
     model_config = ConfigDict(populate_by_name=True)
 
+    # "Fastest" for the primary route, "Alternative" for anything in
+    # alternative_routes — see traffic_service.py's multi-route search.
+    label: str = "Fastest"
     origin: str
     destination: str
     line: int
@@ -123,15 +131,24 @@ class TransitCommuteResponse(BaseModel):
     slow_zone_delay_minutes: float = Field(alias="slowZoneDelayMinutes")
     slow_zone_delay_seconds: float = Field(alias="slowZoneDelaySeconds")
     telemetry_source: str = Field(alias="telemetrySource")  # "gtfs_realtime" | "kinematic_model"
+    # Live-observed (GTFS-RT TripUpdates) or, absent that, detour-estimated
+    # delay on a streetcar/bus leg of this route — see router.py's
+    # surface_realtime_service integration. A subset of slow_zone_delay_*
+    # above (already reflected in total_duration_minutes), broken out so the
+    # UI can badge it distinctly ("Streetcar Delay"/"Traffic Delay") instead
+    # of folding it into the subway-oriented "Track Slowdown" badge. 0 for
+    # the subway-only fast path, or when no surface leg is delayed.
+    streetcar_delay_minutes: float = Field(default=0.0, alias="streetcarDelayMinutes")
+    bus_delay_minutes: float = Field(default=0.0, alias="busDelayMinutes")
     alert_delay_minutes: float = Field(alias="alertDelayMinutes")
     detour_delay_minutes: float = Field(default=0.0, alias="detourDelayMinutes")
     detour_warnings: list[str] = Field(default_factory=list, alias="detourWarnings")
     upcoming_detour_notices: list[str] = Field(default_factory=list, alias="upcomingDetourNotices")
     alternate_route: Optional[str] = Field(default=None, alias="alternateRoute")
     total_duration_minutes: float = Field(alias="totalDurationMinutes")
-    active_slow_zones: list[ActiveSlowZone] = Field(alias="activeSlowZones")
-    is_disrupted: bool = Field(alias="isDisrupted")
-    active_alerts_on_route: list[ServiceAlert] = Field(alias="activeAlertsOnRoute")
+    active_slow_zones: list[ActiveSlowZone] = Field(default_factory=list, alias="activeSlowZones")
+    is_disrupted: bool = Field(default=False, alias="isDisrupted")
+    active_alerts_on_route: list[ServiceAlert] = Field(default_factory=list, alias="activeAlertsOnRoute")
     steps: list[CommuteStep] = Field(default_factory=list)
     # Populated by router.py's multi-modal (walk+bus+streetcar+subway) fallback
     # path — empty for the subway-only fast path, which the existing `steps`
@@ -140,3 +157,10 @@ class TransitCommuteResponse(BaseModel):
     departure_time: str = Field(alias="departureTime")
     arrival_time: str = Field(alias="arrivalTime")
     source: str
+
+
+class TransitCommuteResponse(RouteSummary):
+    # Up to one genuinely different, real alternative route (see
+    # router.py's find_itineraries) — empty when no competitive alternative
+    # exists, or for the subway-only fast path, which doesn't search for one.
+    alternative_routes: list[RouteSummary] = Field(default_factory=list, alias="alternativeRoutes")

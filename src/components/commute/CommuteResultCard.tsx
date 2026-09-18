@@ -1,9 +1,14 @@
+import { useState } from "react";
 import { formatStationLabel } from "@/lib/stationDisplay";
-import type { AlertCategory, ItineraryLeg, ServiceAlert, TransitCommuteResponse } from "@/types/traffic";
+import { findStationByName } from "@/lib/geo/subwayGeoJSON";
+import type { AlertCategory, ItineraryLeg, RouteSummary, ServiceAlert, TransitCommuteResponse } from "@/types/traffic";
 
 interface CommuteResultCardProps {
   result: TransitCommuteResponse;
   className?: string;
+  /** Fired when the rider picks a different stacked route card — lets the
+   * parent re-highlight the newly selected route on TTCMap. */
+  onSelectRoute?: (route: RouteSummary) => void;
 }
 
 const DELAY_BADGE_STYLES = {
@@ -112,10 +117,21 @@ const ITINERARY_MODE_ICONS: Record<ItineraryLeg["mode"], string> = {
   subway: "🚇",
 };
 
-/** e.g. "Line 1 Southbound to Union Station" (subway), "506 to Dundas West
- * Station" (streetcar/bus), or "Walk 117m to College Station". */
+/** Appends "Station" only when `name` actually names one (a subway leg's
+ * stations are already canonical — see traffic_service.py's name cleanup —
+ * and a walk leg can legitimately end at one too, e.g. "Walk to Don Mills"
+ * right before boarding) — a streetcar/bus leg's endpoint, or the rider's
+ * own address/landmark, is just as often a plain street stop ("Spadina Ave
+ * at Willcocks St") or a business name ("McDonald's"), which "Station"
+ * would wrongly imply is a subway/rail stop. */
+function formatDestinationLabel(name: string): string {
+  return findStationByName(name) ? formatStationLabel(name) : name;
+}
+
+/** e.g. "Line 1 Southbound to Union Station" (subway), "506 to Dundas West"
+ * (streetcar/bus), or "Walk 117m to College Station". */
 function formatItineraryLegHeadline(leg: ItineraryLeg): string {
-  const destination = formatStationLabel(leg.toName);
+  const destination = formatDestinationLabel(leg.toName);
   if (leg.mode === "walk") {
     const meters = leg.distanceMeters != null ? Math.round(leg.distanceMeters) : null;
     return `Walk${meters ? ` ${meters}m` : ""} to ${destination}`;
@@ -151,23 +167,54 @@ function isDisplayedLeg(leg: ItineraryLeg, index: number, legs: ItineraryLeg[]):
   return leg.durationMinutes > MID_TRIP_WALK_MIN_MINUTES || (leg.distanceMeters ?? 0) > MID_TRIP_WALK_MIN_METERS;
 }
 
-export default function CommuteResultCard({ result, className = "" }: CommuteResultCardProps) {
-  const delayBadge = formatDelayBadge(result.slowZoneDelaySeconds);
-  const isLiveTelemetry = result.telemetrySource === "gtfs_realtime";
+interface RouteCardProps {
+  route: RouteSummary;
+  isSelected: boolean;
+  onSelect: () => void;
+}
+
+/** One stacked route option — the primary/fastest result, or one of
+ * result.alternativeRoutes. Selecting a non-active card re-highlights that
+ * route's path on TTCMap (see CommuteResultCard's onSelectRoute). */
+function RouteCard({ route, isSelected, onSelect }: RouteCardProps) {
+  const delayBadge = formatDelayBadge(route.slowZoneDelaySeconds);
+  const isLiveTelemetry = route.telemetrySource === "gtfs_realtime";
 
   // Split activeAlertsOnRoute so its "upcoming" entries join the one
   // combined, collapsible Upcoming Notices section below instead of a
   // second always-expanded block duplicating the same sky-blue treatment.
-  const activeAlerts = result.activeAlertsOnRoute.filter((alert) => !alert.isUpcomingNotice);
-  const upcomingAlertNotices = result.activeAlertsOnRoute
+  const activeAlerts = route.activeAlertsOnRoute.filter((alert) => !alert.isUpcomingNotice);
+  const upcomingAlertNotices = route.activeAlertsOnRoute
     .filter((alert) => alert.isUpcomingNotice)
     .map((alert) => `ℹ️ Upcoming: ${alert.headline}`);
-  const upcomingNotices = dedupeText([...upcomingAlertNotices, ...result.upcomingDetourNotices]);
+  const upcomingNotices = dedupeText([...upcomingAlertNotices, ...route.upcomingDetourNotices]);
 
   return (
-    <div
-      className={`rounded-2xl border border-neutral-200 bg-neutral-50 p-4 dark:border-white/10 dark:bg-white/5 ${className}`}
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={isSelected}
+      className={`block w-full rounded-2xl border p-4 text-left transition-colors ${
+        isSelected
+          ? "border-red-500 bg-white ring-2 ring-red-500/50 dark:border-red-400 dark:bg-neutral-900 dark:ring-red-400/40"
+          : "border-neutral-200 bg-neutral-50 hover:border-neutral-300 dark:border-white/10 dark:bg-white/5 dark:hover:border-white/20"
+      }`}
     >
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <span
+          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${
+            isSelected
+              ? "bg-red-600 text-white"
+              : "bg-neutral-200 text-neutral-600 dark:bg-white/10 dark:text-white/60"
+          }`}
+        >
+          {route.label === "Fastest" ? "⚡ Fastest" : "🔀 Alternative Route"}
+        </span>
+        <span className="text-xs font-bold text-neutral-700 dark:text-white/80">
+          {route.label === "Fastest" ? formatMinutes(route.totalDurationMinutes) : `Alternative Route · ${formatMinutes(route.totalDurationMinutes)}`}
+        </span>
+      </div>
+
       {activeAlerts.length > 0 && (
         <div className="mb-3 flex flex-col gap-2">
           {sortAlertsBySeverity(activeAlerts).map((alert) => (
@@ -181,9 +228,9 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
         </div>
       )}
 
-      {result.detourWarnings.length > 0 && (
+      {route.detourWarnings.length > 0 && (
         <div className="mb-3 flex flex-col gap-2">
-          {result.detourWarnings.map((warning) => (
+          {route.detourWarnings.map((warning) => (
             <div
               key={warning}
               className="rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-xs font-medium text-red-900 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100"
@@ -191,9 +238,9 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
               {warning}
             </div>
           ))}
-          {result.alternateRoute && (
+          {route.alternateRoute && (
             <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-500/15 dark:text-emerald-100">
-              🔁 {result.alternateRoute}
+              🔁 {route.alternateRoute}
             </div>
           )}
         </div>
@@ -224,7 +271,7 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
             Scheduled Time
           </p>
           <p className="text-lg font-bold text-neutral-900 dark:text-white">
-            {formatMinutes(result.scheduledDurationMinutes)}
+            {formatMinutes(route.scheduledDurationMinutes)}
           </p>
         </div>
         <div className="text-right">
@@ -232,14 +279,14 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
             Estimated Travel Time
           </p>
           <p className="text-lg font-bold text-neutral-900 dark:text-white">
-            {formatMinutes(result.totalDurationMinutes)}
+            {formatMinutes(route.totalDurationMinutes)}
           </p>
         </div>
       </div>
 
-      {result.itinerary.length > 0 ? (
+      {route.itinerary.length > 0 ? (
         <ol className="mt-2 flex flex-col divide-y divide-neutral-200/70 dark:divide-white/10">
-          {result.itinerary
+          {route.itinerary
             .filter((leg, index, legs) => isDisplayedLeg(leg, index, legs))
             .map((leg, index) => {
               const detail = formatItineraryLegDetail(leg);
@@ -269,7 +316,7 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
         </ol>
       ) : (
         <p className="mt-2 text-xs text-neutral-500 dark:text-white/50">
-          Line {result.line} · {result.stationHops} stop{result.stationHops === 1 ? "" : "s"}
+          Line {route.line} · {route.stationHops} stop{route.stationHops === 1 ? "" : "s"}
         </p>
       )}
 
@@ -290,20 +337,30 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
             Live Telemetry
           </span>
         )}
-        {result.alertDelayMinutes > 0 && (
+        {route.alertDelayMinutes > 0 && (
           <span
             className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
-              result.isDisrupted
+              route.isDisrupted
                 ? "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300"
                 : "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
             }`}
           >
-            +{formatMinutes(result.alertDelayMinutes)} Service Alert Delay
+            +{formatMinutes(route.alertDelayMinutes)} Service Alert Delay
           </span>
         )}
-        {result.detourDelayMinutes > 0 && (
+        {route.detourDelayMinutes > 0 && (
           <span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700 dark:bg-red-500/15 dark:text-red-300">
-            +{formatMinutes(result.detourDelayMinutes)} Detour Delay
+            +{formatMinutes(route.detourDelayMinutes)} Detour Delay
+          </span>
+        )}
+        {route.streetcarDelayMinutes > 0 && (
+          <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
+            +{formatMinutes(route.streetcarDelayMinutes)} Streetcar Delay
+          </span>
+        )}
+        {route.busDelayMinutes > 0 && (
+          <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
+            +{formatMinutes(route.busDelayMinutes)} Traffic Delay
           </span>
         )}
         <p className="ml-auto text-xs text-neutral-500 dark:text-white/50">
@@ -317,20 +374,20 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
             className="font-semibold text-neutral-800 dark:text-white"
             suppressHydrationWarning
           >
-            {formatClockTime(result.arrivalTime)}
+            {formatClockTime(route.arrivalTime)}
           </span>
         </p>
       </div>
 
-      {result.activeSlowZones.length > 0 && (
+      {route.activeSlowZones.length > 0 && (
         <details className="group mt-3">
           <summary className="cursor-pointer list-none text-xs font-semibold text-red-600 marker:content-none dark:text-red-400">
-            {result.activeSlowZones.length} active slow zone
-            {result.activeSlowZones.length === 1 ? "" : "s"} on this route
+            {route.activeSlowZones.length} active slow zone
+            {route.activeSlowZones.length === 1 ? "" : "s"} on this route
             <span className="ml-1 inline-block transition-transform group-open:rotate-180">▾</span>
           </summary>
           <ul className="mt-2 flex flex-col gap-2">
-            {result.activeSlowZones.map((zone) => (
+            {route.activeSlowZones.map((zone) => (
               <li
                 key={zone.id}
                 className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200"
@@ -346,11 +403,41 @@ export default function CommuteResultCard({ result, className = "" }: CommuteRes
         </details>
       )}
 
-      {result.source === "fallback" && (
+      {route.source === "fallback" && (
         <p className="mt-3 text-[11px] text-neutral-400 dark:text-white/30">
           Live TTC slow zone data is unavailable — showing a fallback estimate.
         </p>
       )}
+    </button>
+  );
+}
+
+export default function CommuteResultCard({ result, className = "", onSelectRoute }: CommuteResultCardProps) {
+  const routes: RouteSummary[] = [result, ...result.alternativeRoutes];
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // A brand-new commute result (a fresh search) should always start back on
+  // the fastest option, not whichever card happened to be selected for the
+  // previous query — adjusted during render (React's recommended pattern for
+  // "derive state from a prop change") rather than in an effect, since it
+  // only needs to run once per actual result change.
+  const [lastSyncedResult, setLastSyncedResult] = useState(result);
+  if (result !== lastSyncedResult) {
+    setLastSyncedResult(result);
+    setSelectedIndex(0);
+  }
+
+  function handleSelect(index: number) {
+    if (index === selectedIndex) return;
+    setSelectedIndex(index);
+    onSelectRoute?.(routes[index]);
+  }
+
+  return (
+    <div className={`max-h-[60vh] overflow-y-auto space-y-4 pr-1 ${className}`}>
+      {routes.map((route, index) => (
+        <RouteCard key={index} route={route} isSelected={index === selectedIndex} onSelect={() => handleSelect(index)} />
+      ))}
     </div>
   );
 }

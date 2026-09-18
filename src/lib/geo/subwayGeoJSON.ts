@@ -21,28 +21,6 @@ interface SubwayLineShape {
 
 const LINE_SHAPES = subwayLineShapes as unknown as Record<string, SubwayLineShape>;
 
-/**
- * Interchange stations whose two lines cross at one well-defined geometric
- * point — found by intersecting their real GTFS shape polylines (see
- * backend/scripts/snap_stations_to_track.py, which also snapped every
- * *other* station's ttc-stations.json coordinate onto its own line, fixing
- * the 30-90m gap between a GTFS stop's surface-entrance coordinate and the
- * actual track centerline). ttc-stations.json's entries for these stations
- * are set to their exact crossing point (St George's is the centroid of a
- * tight cluster of several near-together real crossings, not one single
- * vertex, but still well within a track-width of accurate) — this set
- * extends a route/slow-zone slice touching one of them out to that same
- * point, closing what would otherwise be a many-meter gap between the
- * slice's nearest real shape vertex and the marker.
- *
- * Deliberately excludes Spadina: its Line 1/Line 2 tracks don't literally
- * cross at all (that transfer is via a connecting corridor, not a track
- * junction), so its coordinate is a midpoint between each line's own
- * nearest point — genuinely off both curves, which would reopen the old
- * "spur" bug (see getRouteCoordinates below) if used to extend a slice.
- */
-const KNOWN_INTERCHANGE_INTERSECTIONS = new Set(["bloor-yonge", "st-george", "sheppard-yonge"]);
-
 interface LineDefinition {
   id: LineId;
   name: string;
@@ -311,21 +289,24 @@ export function getStationByNameOrId(query: string): Station | undefined {
  * zone/disruption overlay) on the map.
  *
  * Slices the real curved track (see LINE_SHAPES) between the two stations'
- * positions along it — an exact, contiguous sub-sequence of the very same
- * `shapePoints` array fullLineCoordinates() renders as the base line, with
- * no extra points added at either end. A canonical station dot (from
- * ttc-stations.json) sits wherever we've manually pinned that station's
- * marker — not necessarily on the physical track centerline the GTFS shape
- * traces — commonly 50-200m off it, so anchoring a slice's endpoints there
- * (an earlier version of this function did) opened a short diagonal gap
- * between the curve's real nearest vertex and that dot: a visible spur
- * peeling off the track at every highlight/slow-zone boundary. Slicing pure
- * vertices instead guarantees the overlay sits flush on the base line with
- * zero divergence, by construction. Falls back to the coarser
- * station-to-station chord (still correctly ordered, just without the
- * curved in-between geometry, but matching fullLineCoordinates()'s own
- * chord-based fallback exactly) when this line has no shape data, or either
- * station isn't located on it.
+ * recorded positions along it, then clamps both ends exactly onto the
+ * stations' own marker coordinates (ttc-stations.json, snapped precisely
+ * onto the line by backend/scripts/snap_stations_to_track.py). The
+ * distance-based slice boundary and that snapped marker don't always land
+ * on the exact same point — GTFS's own recorded shape_dist_traveled for a
+ * station's stop and the true geometric nearest point can disagree by
+ * anywhere from ~15m to, right at a sharp turn like Union's loop, ~180m —
+ * so without clamping, the slice can stop noticeably short of the station,
+ * or (worse, at that same sharp turn) run past it into the next segment of
+ * track. Earlier this function anchored nowhere *but* the raw shape
+ * vertices, specifically to avoid a spur — that was needed when station
+ * coordinates were still their unadjusted GTFS-stop position (50-200m off
+ * the track); now that every station is snapped onto its line first, this
+ * clamp lands within a track-width of the slice's own geometry instead of
+ * opening a new gap. Falls back to the coarser station-to-station chord
+ * (still correctly ordered, just without the curved in-between geometry,
+ * but matching fullLineCoordinates()'s own chord-based fallback exactly)
+ * when this line has no shape data, or either station isn't located on it.
  */
 export function getRouteCoordinates(
   lineId: number,
@@ -350,18 +331,14 @@ export function getRouteCoordinates(
       .map(([lon, lat]) => [lon, lat]);
     if (path.length < 2) return [];
 
-    // The nearest real shape vertex to an interchange station's own
-    // recorded stop position can still sit 50-90m short of where the two
-    // lines actually cross (see KNOWN_INTERCHANGE_INTERSECTIONS above) —
-    // extend the slice the rest of the way to that exact point so a slow
-    // zone/highlight ending at Bloor-Yonge reaches the station center
-    // instead of stopping short of it with a visible gap. Only ever adds a
-    // point past the real curve's own end, in the same direction it was
-    // already heading, so this reads as a seamless continuation, not a
-    // detached spur (contrast the old canonical-dot anchoring this function
-    // deliberately no longer does — see this function's own docstring).
-    if (KNOWN_INTERCHANGE_INTERSECTIONS.has(lowDistId)) path.unshift(getStation(lowDistId).coordinates);
-    if (KNOWN_INTERCHANGE_INTERSECTIONS.has(highDistId)) path.push(getStation(highDistId).coordinates);
+    // Clamp — never extend past, never stop short of — the slice's two ends
+    // to the stations' own snapped marker coordinates (see this function's
+    // docstring). Overwriting (not appending) is what actually stops the
+    // slice bleeding past the terminal station along a sharp curve like
+    // Union's loop: an appended extra point can't undo a boundary that
+    // already overshot into the next segment of track.
+    path[0] = getStation(lowDistId).coordinates;
+    path[path.length - 1] = getStation(highDistId).coordinates;
 
     // The GTFS trip this shape was extracted from may run in either physical
     // direction relative to this line's stationIds array — normalize so
