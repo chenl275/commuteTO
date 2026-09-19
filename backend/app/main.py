@@ -4,10 +4,18 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AlertsResponse, SlowZonesResponse, TransitCommuteRequest, TransitCommuteResponse
+from .schemas import (
+    AlertsResponse,
+    DetoursResponse,
+    SlowZonesResponse,
+    TransitCommuteRequest,
+    TransitCommuteResponse,
+)
 from .services.alerts_service import get_alerts
+from .services.detour_service import get_active_surface_detours
 from .services.slow_zones_scraper import get_slow_zones
 from .services.surface_transit import (
+    get_day_buses_geojson,
     get_night_buses_geojson,
     get_streetcars_geojson,
     get_surface_stops_geojson,
@@ -47,6 +55,11 @@ def surface_streetcars() -> dict:
     return get_streetcars_geojson()
 
 
+@app.get("/transit/surface/day-buses")
+def surface_day_buses() -> dict:
+    return get_day_buses_geojson()
+
+
 @app.get("/transit/surface/night-buses")
 def surface_night_buses() -> dict:
     return get_night_buses_geojson()
@@ -55,6 +68,11 @@ def surface_night_buses() -> dict:
 @app.get("/transit/surface/stops")
 def surface_stops() -> dict:
     return get_surface_stops_geojson()
+
+
+@app.get("/api/detours", response_model=DetoursResponse)
+async def detours() -> DetoursResponse:
+    return DetoursResponse(detours=await get_active_surface_detours())
 
 
 @app.post("/traffic", response_model=TransitCommuteResponse)

@@ -12,11 +12,12 @@ import {
   stationsGeoJSON,
 } from "@/lib/geo/subwayGeoJSON";
 import { useIsDarkMode } from "@/components/theme/useIsDarkMode";
-import { getAlerts, getNightBuses, getSlowZones, getStreetcars, getSurfaceStops } from "@/lib/traffic";
+import { getAlerts, getDayBuses, getNightBuses, getSlowZones, getStreetcars, getSurfaceStops } from "@/lib/traffic";
 import { reverseGeocode } from "@/lib/geocoding";
 import { formatStationLabel } from "@/lib/stationDisplay";
+import { useDetourMap } from "@/lib/detourMapContext";
 import type { LocationSelection } from "@/lib/types";
-import type { RouteSummary } from "@/types/traffic";
+import type { DetourSummary, RouteSummary } from "@/types/traffic";
 
 interface TTCMapProps {
   className?: string;
@@ -64,6 +65,8 @@ const ENDPOINTS_GLOW_LAYER_ID = "ttc-route-endpoints-glow";
 const ENDPOINTS_LAYER_ID = "ttc-route-endpoints-layer";
 const STREETCARS_SOURCE_ID = "ttc-streetcars";
 const STREETCARS_LAYER_ID = "streetcar-line";
+const DAY_BUSES_SOURCE_ID = "ttc-day-buses";
+const DAY_BUSES_LAYER_ID = "day-buses";
 const NIGHT_BUSES_SOURCE_ID = "ttc-night-buses";
 const NIGHT_BUSES_LAYER_ID = "night-bus-line";
 const SURFACE_STOPS_SOURCE_ID = "ttc-surface-stops";
@@ -84,8 +87,12 @@ const SUBWAY_LAYER_IDS = [
   DISRUPTIONS_LAYER_ID,
 ];
 const STREETCAR_LAYER_IDS = [STREETCARS_LAYER_ID, STREETCAR_STOPS_HALO_LAYER_ID, STREETCAR_STOPS_LAYER_ID];
+// No dedicated stops layer for day buses — this is a line-only overlay
+// (see addDayBusLayer), unlike streetcars/night buses.
+const DAY_BUS_LAYER_IDS = [DAY_BUSES_LAYER_ID];
 const NIGHT_BUS_LAYER_IDS = [NIGHT_BUSES_LAYER_ID, NIGHT_BUS_STOPS_HALO_LAYER_ID, NIGHT_BUS_STOPS_LAYER_ID];
 
+const DAY_BUS_COLOR = "#2563EB";
 const NIGHT_BUS_COLOR = "#2A4365";
 const SURFACE_STOP_COLOR = "#BA0C2F";
 
@@ -120,6 +127,11 @@ const MAJOR_INTERCHANGE_RADIUS_MULTIPLIER = 1.3;
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const STREETCAR_WIDTH_EXPRESSION: any = ["interpolate", ["linear"], ["zoom"], 10, 0.75, 12, 1.2, 14, 2.0];
 const STREETCAR_OPACITY_EXPRESSION: any = ["interpolate", ["linear"], ["zoom"], 10, 0.35, 12, 0.55, 14, 0.8];
+// ~150 routes' worth of lines — a thin 1px hairline below zoom 12 (still
+// rendered from DAY_BUSES_MIN_ZOOM up, see addDayBusLayer) so the network is
+// visible right at the app's default zoom without reading as visual noise,
+// then thickens as the rider zooms into individual routes.
+const DAY_BUS_WIDTH_EXPRESSION: any = ["interpolate", ["linear"], ["zoom"], 10, 1.0, 12, 1.5, 16, 3.5];
 const NIGHT_BUS_WIDTH_EXPRESSION: any = ["interpolate", ["linear"], ["zoom"], 10, 0.75, 12, 1.0, 14, 1.6];
 const NIGHT_BUS_OPACITY_EXPRESSION: any = STREETCAR_OPACITY_EXPRESSION;
 const IS_MAJOR_INTERCHANGE_EXPRESSION: any = [
@@ -156,18 +168,43 @@ const HOVERED_SURFACE_LINE_WIDTH = 3.0;
 const HOVERED_SURFACE_LINE_OPACITY = 1.0;
 const DIMMED_SURFACE_LINE_OPACITY = 0.2;
 
+// Below this, the full ~150-route day-bus network would draw as visual
+// noise over half the city at once; the layer simply doesn't render until
+// the rider has zoomed in enough for individual routes to be legible. Kept
+// at/below the app's default zoom (11.5, see DEFAULT_MAP_ZOOM) so the
+// network is already visible on load once the toggle is checked, rather
+// than only appearing after the rider manually zooms in further.
+const DAY_BUSES_MIN_ZOOM = 10;
+
+// Applied to every background transit layer (subway, streetcar, day/night
+// bus, stations) while a detour is being viewed (see the viewedDetour
+// effect below) — isolates the rerouted corridor by fading everything else
+// out rather than hiding it outright, so the surrounding network stays
+// visible for context.
+const DETOUR_VIEW_DIMMED_OPACITY = 0.15;
+
+const DETOUR_EFFECT_LABELS: Record<DetourSummary["effect"], string> = {
+  DETOUR: "Detour — bypassed",
+  MODIFIED_SERVICE: "Modified service",
+  NO_SERVICE: "No service",
+};
+
 interface LayerVisibility {
   subways: boolean;
   streetcars: boolean;
+  dayBuses: boolean;
   nightBuses: boolean;
 }
 
-// Subways and streetcars shown by default; night buses stay opt-in since
-// they're only relevant during the overnight window most visitors aren't
-// browsing in.
+// Subways and streetcars shown by default; day buses and night buses stay
+// opt-in — day buses because the full network is a much heavier layer to
+// render (see DAY_BUSES_MIN_ZOOM and getDayBuses' lazy fetch), night buses
+// because they're only relevant during the overnight window most visitors
+// aren't browsing in.
 const DEFAULT_LAYER_VISIBILITY: LayerVisibility = {
   subways: true,
   streetcars: true,
+  dayBuses: false,
   nightBuses: false,
 };
 
@@ -183,6 +220,7 @@ const LAYER_TOGGLE_OPTIONS: Array<{
 }> = [
   { key: "subways", label: "Subways", swatchClassName: "bg-neutral-700 dark:bg-neutral-300" },
   { key: "streetcars", label: "Streetcars", swatchClassName: "bg-red-800" },
+  { key: "dayBuses", label: "Day Buses", swatchClassName: "bg-blue-600" },
   { key: "nightBuses", label: "Night Buses", swatchClassName: "bg-indigo-900" },
 ];
 
@@ -380,7 +418,42 @@ function setLayersVisible(map: maplibregl.Map, layerIds: string[], visible: bool
 function applyLayerVisibility(map: maplibregl.Map, visibility: LayerVisibility) {
   setLayersVisible(map, SUBWAY_LAYER_IDS, visibility.subways);
   setLayersVisible(map, STREETCAR_LAYER_IDS, visibility.streetcars);
+  setLayersVisible(map, DAY_BUS_LAYER_IDS, visibility.dayBuses);
   setLayersVisible(map, NIGHT_BUS_LAYER_IDS, visibility.nightBuses);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- mixes bare numbers with the STREETCAR/NIGHT_BUS zoom-interpolated opacity expressions
+type PaintValue = any;
+
+/** Every background transit layer dimmed while a detour is being viewed (see
+ * the viewedDetour effect) — each entry's `normal` is that layer's own
+ * un-dimmed opacity value/expression, exactly as set where the layer is
+ * first added, so restoring is just replaying it. */
+const BACKGROUND_DIM_TARGETS: Array<{ layerId: string; property: "line-opacity" | "circle-opacity"; normal: PaintValue }> = [
+  { layerId: LINES_CASING_LAYER_ID, property: "line-opacity", normal: 1 },
+  { layerId: LINES_LAYER_ID, property: "line-opacity", normal: 1 },
+  { layerId: STATIONS_LAYER_ID, property: "circle-opacity", normal: 1 },
+  { layerId: SLOW_ZONES_LAYER_ID, property: "line-opacity", normal: 0.95 },
+  { layerId: DISRUPTIONS_GLOW_LAYER_ID, property: "line-opacity", normal: 0.35 },
+  { layerId: DISRUPTIONS_LAYER_ID, property: "line-opacity", normal: 1 },
+  { layerId: STREETCARS_LAYER_ID, property: "line-opacity", normal: STREETCAR_OPACITY_EXPRESSION },
+  { layerId: STREETCAR_STOPS_HALO_LAYER_ID, property: "circle-opacity", normal: 0.35 },
+  { layerId: STREETCAR_STOPS_LAYER_ID, property: "circle-opacity", normal: 1 },
+  { layerId: DAY_BUSES_LAYER_ID, property: "line-opacity", normal: 1 },
+  { layerId: NIGHT_BUSES_LAYER_ID, property: "line-opacity", normal: NIGHT_BUS_OPACITY_EXPRESSION },
+  { layerId: NIGHT_BUS_STOPS_HALO_LAYER_ID, property: "circle-opacity", normal: 0.35 },
+  { layerId: NIGHT_BUS_STOPS_LAYER_ID, property: "circle-opacity", normal: 1 },
+];
+
+/** Fades every base network layer to DETOUR_VIEW_DIMMED_OPACITY (dimmed) or
+ * back to its own normal opacity (restored) — used to isolate the corridor
+ * a selected detour affects without hiding the rest of the network outright. */
+function setBackgroundLayersDimmed(map: maplibregl.Map, dimmed: boolean) {
+  for (const { layerId, property, normal } of BACKGROUND_DIM_TARGETS) {
+    if (map.getLayer(layerId)) {
+      map.setPaintProperty(layerId, property, dimmed ? DETOUR_VIEW_DIMMED_OPACITY : normal);
+    }
+  }
 }
 
 function addStreetcarLayer(map: maplibregl.Map, data: GeoJSON.FeatureCollection, visible: boolean) {
@@ -401,6 +474,25 @@ function addStreetcarLayer(map: maplibregl.Map, data: GeoJSON.FeatureCollection,
         "line-color": ["get", "colorHex"],
         "line-width": STREETCAR_WIDTH_EXPRESSION,
         "line-opacity": STREETCAR_OPACITY_EXPRESSION,
+      },
+    });
+  }
+}
+
+function addDayBusLayer(map: maplibregl.Map, data: GeoJSON.FeatureCollection, visible: boolean) {
+  if (!map.getSource(DAY_BUSES_SOURCE_ID)) {
+    map.addSource(DAY_BUSES_SOURCE_ID, { type: "geojson", data });
+  }
+  if (!map.getLayer(DAY_BUSES_LAYER_ID)) {
+    map.addLayer({
+      id: DAY_BUSES_LAYER_ID,
+      type: "line",
+      source: DAY_BUSES_SOURCE_ID,
+      minzoom: DAY_BUSES_MIN_ZOOM,
+      layout: { "line-cap": "round", "line-join": "round", visibility: visible ? "visible" : "none" },
+      paint: {
+        "line-color": DAY_BUS_COLOR,
+        "line-width": DAY_BUS_WIDTH_EXPRESSION,
       },
     });
   }
@@ -595,6 +687,40 @@ function buildSurfaceStopTooltipContent(properties: { name: string; routes: stri
   routesLine.className = "mt-0.5 text-[11px] text-neutral-600";
   routesLine.textContent = `Routes: ${routes.join(", ")}`;
   container.appendChild(routesLine);
+
+  return container;
+}
+
+/** A red ring with a diagonal slash through it — the warning marker dropped
+ * on each stop a selected detour names as closed/bypassed (see the
+ * viewedDetour effect). Built as a plain DOM node (maplibregl.Marker takes
+ * one directly, like the origin/destination pins in placePin below) and
+ * styled entirely with Tailwind utility classes per the project's no-inline-CSS rule. */
+function createDetourStopMarkerElement(): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className =
+    "flex h-6 w-6 items-center justify-center rounded-full border-2 border-red-600 bg-red-600/25 shadow-[0_0_0_2px_rgba(255,255,255,0.9)]";
+  el.setAttribute("role", "img");
+  el.setAttribute("aria-label", "Closed or bypassed stop");
+  const slash = document.createElement("span");
+  slash.className = "block h-[2px] w-4 rotate-45 rounded-full bg-red-600";
+  el.appendChild(slash);
+  return el;
+}
+
+function buildDetourStopTooltipContent(properties: { name: string; effectLabel: string }): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "max-w-[220px] p-1";
+
+  const name = document.createElement("p");
+  name.className = "text-xs font-semibold text-neutral-900";
+  name.textContent = properties.name;
+  container.appendChild(name);
+
+  const effect = document.createElement("p");
+  effect.className = "mt-0.5 text-[11px] font-medium text-red-600";
+  effect.textContent = properties.effectLabel;
+  container.appendChild(effect);
 
   return container;
 }
@@ -909,6 +1035,12 @@ export default function TTCMap({
   const isDark = useIsDarkMode();
   const hasSetInitialStyleRef = useRef(false);
 
+  // The detour a rider picked "View on Map" for in the header's DetourPanel
+  // (a sibling component, see lib/detourMapContext) — drives the warning
+  // markers + background dimming effect further down.
+  const { viewedDetour, clearViewedDetour } = useDetourMap();
+  const detourMarkersRef = useRef<maplibregl.Marker[]>([]);
+
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>(DEFAULT_LAYER_VISIBILITY);
   const layerVisibilityRef = useRef(layerVisibility);
 
@@ -929,6 +1061,12 @@ export default function TTCMap({
   const slowZonesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const disruptionsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const streetcarsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+  // Unlike streetcars/night buses (fetched unconditionally below), the full
+  // day-bus network is a much heavier payload — only fetched once the rider
+  // actually checks "Day Buses" (see the effect further down), and cached
+  // here afterward so unchecking/rechecking never re-fetches it.
+  const dayBusesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
+  const hasFetchedDayBusesRef = useRef(false);
   const nightBusesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const surfaceStopsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const routeDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
@@ -976,6 +1114,32 @@ export default function TTCMap({
       cancelled = true;
     };
   }, []);
+
+  // Fetch the day-bus network the first time the rider actually checks
+  // "Day Buses" — deliberately not bundled into the effect above, since
+  // that ~150-route payload is far heavier than streetcars/night buses and
+  // most visitors will never enable it (see DEFAULT_LAYER_VISIBILITY).
+  useEffect(() => {
+    if (!layerVisibility.dayBuses || hasFetchedDayBusesRef.current) return;
+    hasFetchedDayBusesRef.current = true;
+    let cancelled = false;
+
+    getDayBuses()
+      .then((geojson) => {
+        if (cancelled) return;
+        dayBusesDataRef.current = geojson;
+        (mapRef.current?.getSource(DAY_BUSES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(geojson);
+      })
+      .catch(() => {
+        // Let a later toggle-off/on retry the fetch instead of leaving the
+        // layer permanently empty for the rest of this session.
+        hasFetchedDayBusesRef.current = false;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [layerVisibility.dayBuses]);
 
   // Fetch live slow zones once on mount and draw them as a dashed amber
   // overlay on top of the affected track segments.
@@ -1114,6 +1278,7 @@ export default function TTCMap({
       // added next — always renders on top of it, keeping subway the
       // visually dominant network regardless of z-order coincidences.
       addStreetcarLayer(map, streetcarsDataRef.current, layerVisibilityRef.current.streetcars);
+      addDayBusLayer(map, dayBusesDataRef.current, layerVisibilityRef.current.dayBuses);
       addNightBusLayer(map, nightBusesDataRef.current, layerVisibilityRef.current.nightBuses);
       addBaseLineLayer(map);
       addSlowZoneLayer(map, slowZonesDataRef.current);
@@ -1241,6 +1406,39 @@ export default function TTCMap({
           surfaceRouteHoverPopup = null;
         });
       }
+
+      // Day buses get the same hover popup as streetcars/night buses (route
+      // number + name + "Bus"), but no highlightSurfaceRoute dim/highlight —
+      // that function only targets the streetcar/night-bus layers, and
+      // dimming ~150 other bus routes on every hover would be far noisier
+      // than useful here.
+      map.on("mouseenter", DAY_BUSES_LAYER_ID, () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mousemove", DAY_BUSES_LAYER_ID, (event) => {
+        const feature = event.features?.[0];
+        if (!feature || feature.geometry.type !== "LineString") return;
+        const properties = feature.properties as { routeShortName: string; routeLongName: string };
+
+        if (!surfaceRouteHoverPopup) {
+          surfaceRouteHoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 6 });
+        }
+        surfaceRouteHoverPopup
+          .setLngLat(event.lngLat)
+          .setDOMContent(
+            buildSurfaceRouteTooltipContent({
+              routeShortName: properties.routeShortName,
+              routeLongName: properties.routeLongName,
+              networkLabel: "Bus",
+            })
+          )
+          .addTo(map);
+      });
+      map.on("mouseleave", DAY_BUSES_LAYER_ID, () => {
+        map.getCanvas().style.cursor = "";
+        surfaceRouteHoverPopup?.remove();
+        surfaceRouteHoverPopup = null;
+      });
 
       // Hovering a surface stop (either network) shows its name + the routes serving it.
       for (const stopLayerId of [STREETCAR_STOPS_LAYER_ID, NIGHT_BUS_STOPS_LAYER_ID]) {
@@ -1395,12 +1593,52 @@ export default function TTCMap({
     }
   }, [commuteResult]);
 
+  // Selecting a detour from the header's DetourPanel ("View on Map") isolates
+  // its corridor: fit the map to its affected stops, drop a warning marker on
+  // each, and dim every other background transit layer so the rerouted
+  // segment reads clearly against the rest of the network.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    for (const marker of detourMarkersRef.current) marker.remove();
+    detourMarkersRef.current = [];
+
+    if (!viewedDetour) {
+      setBackgroundLayersDimmed(map, false);
+      return;
+    }
+
+    setBackgroundLayersDimmed(map, true);
+
+    const effectLabel = DETOUR_EFFECT_LABELS[viewedDetour.effect] ?? viewedDetour.effect;
+    let bounds: maplibregl.LngLatBounds | null = null;
+
+    for (const stop of viewedDetour.affectedStops) {
+      const lngLat: [number, number] = [stop.lon, stop.lat];
+      const marker = new maplibregl.Marker({ element: createDetourStopMarkerElement(), anchor: "center" })
+        .setLngLat(lngLat)
+        .setPopup(
+          new maplibregl.Popup({ offset: 16, closeButton: false }).setDOMContent(
+            buildDetourStopTooltipContent({ name: stop.name, effectLabel })
+          )
+        )
+        .addTo(map);
+      detourMarkersRef.current.push(marker);
+      bounds = bounds ? bounds.extend(lngLat) : new maplibregl.LngLatBounds(lngLat, lngLat);
+    }
+
+    if (bounds) {
+      map.fitBounds(bounds, { padding: 120, duration: 800, maxZoom: 16 });
+    }
+  }, [viewedDetour]);
+
   function handleLayerToggle(key: keyof LayerVisibility) {
     setLayerVisibility((previous) => ({ ...previous, [key]: !previous[key] }));
   }
 
   return (
-    <div className={className}>
+    <div id="ttc-map" className={className}>
       <div
         ref={containerRef}
         role="region"
@@ -1409,6 +1647,24 @@ export default function TTCMap({
       />
 
       <div className="pointer-events-none absolute inset-0">
+        {viewedDetour && (
+          <div className="pointer-events-auto absolute left-4 top-4 flex max-w-xs items-start gap-2 rounded-lg border border-red-300 bg-white/95 p-3 text-xs shadow-md backdrop-blur dark:border-red-400/30 dark:bg-neutral-900/95">
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-red-600 dark:text-red-300">
+                Viewing detour: Route {viewedDetour.routeShortName ?? "?"}
+              </p>
+              <p className="mt-0.5 line-clamp-3 text-neutral-600 dark:text-white/70">{viewedDetour.summary}</p>
+            </div>
+            <button
+              type="button"
+              onClick={clearViewedDetour}
+              className="shrink-0 rounded-full border border-neutral-300 px-2 py-1 text-[11px] font-semibold text-neutral-600 transition-colors hover:bg-neutral-100 dark:border-white/20 dark:text-white/70 dark:hover:bg-white/10"
+            >
+              Exit
+            </button>
+          </div>
+        )}
+
         {/* bottom-12 (48px) clears MapLibre's attribution/info-badge strip
             pinned at the map's own bottom edge, which sits below this panel
             in the DOM but is rendered by MapLibre itself at bottom-0. */}

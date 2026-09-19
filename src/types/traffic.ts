@@ -110,6 +110,43 @@ export interface AlertsResponse {
   source: TransitSource;
 }
 
+export type DetourEffect = "DETOUR" | "MODIFIED_SERVICE" | "NO_SERVICE";
+
+/** One stop an active detour names as closed/bypassed, resolved to real
+ * coordinates server-side — a streetcar/bus stop has no equivalent in our
+ * subway station-id registry, so this carries its own lat/lon directly. */
+export interface DetourStop {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+}
+
+/** One active bus/streetcar detour/disruption from GET /api/detours — see
+ * backend/app/services/detour_service.py's get_active_surface_detours. */
+export interface DetourSummary {
+  id: string;
+  routeId: string | null;
+  routeShortName: string | null;
+  routeIds: string[];
+  header: string;
+  description: string;
+  summary: string;
+  effect: DetourEffect;
+  /** Raw GTFS stop_ids the alert names as closed/bypassed — not run through
+   * our subway station-id registry, since these are surface (streetcar/bus)
+   * stops with no equivalent mapping. */
+  affectedStopIds: string[];
+  /** Same stops, resolved to name/lat/lon for placing a map marker — a
+   * subset of affectedStopIds when the backend's routing DB doesn't have a
+   * matching row for one. */
+  affectedStops: DetourStop[];
+}
+
+export interface DetoursResponse {
+  detours: DetourSummary[];
+}
+
 export type TelemetrySource = "gtfs_realtime" | "kinematic_model";
 
 /** One leg of a (possibly multi-modal) trip, e.g. a subway ride plus a

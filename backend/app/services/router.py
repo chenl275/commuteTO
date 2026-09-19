@@ -45,8 +45,18 @@ MAX_TRANSFER_CANDIDATES = 6
 
 # Bounds the search so a query near closing time, or toward an unreachable
 # destination, can't scan indefinitely.
-SEARCH_HORIZON_MINUTES = 90
-MAX_SETTLED_STOPS = 8000
+SEARCH_HORIZON_MINUTES = 120
+# Was 8000 — barely below the network's own ~9400 stops, so a legitimate
+# multi-transfer trip to an outer-boundary stop (e.g. downtown to McCowan Rd
+# at Steeles Ave, Subway -> Bus -> Bus) could get cut off mid-search: Dijkstra
+# settles nodes in strictly increasing arrival-time order, and the dense
+# downtown core alone can account for thousands of stops reachable within the
+# horizon, exhausting the old cap before the search ever reached the node
+# that would have relaxed the destination's own walk edge — a real reachable
+# path silently reported as "no route found". Comfortably above the total
+# stop count so the horizon (above), not this, is what actually bounds a
+# hopeless search.
+MAX_SETTLED_STOPS = 20000
 MAX_TRIP_FANOUT_STOPS = 120
 # Minimum realistic alight-and-reboard time at the same physical stop, so a
 # same-platform 0-second transfer isn't preferred over a genuinely faster

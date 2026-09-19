@@ -12,8 +12,9 @@ stop_times.txt, far too slow/heavy to parse per-request):
 
 Writes:
     backend/app/data/streetcars.geojson    (501, 503, 504, 505, 506, 509, 510, 511, 512)
+    backend/app/data/day_buses.geojson     (standard daytime bus routes, e.g. 7, 13, 29 — under 300)
     backend/app/data/night_buses.geojson   (Blue Night bus routes, 300-399 series)
-    backend/app/data/surface_stops.json    (stops served by either network)
+    backend/app/data/surface_stops.json    (stops served by the streetcar or night-bus network)
 
 Route selection notes (see routes.txt route_type/route_short_name):
   - Streetcars are GTFS route_type 0 ("Tram/Streetcar"), but that type also
@@ -23,6 +24,9 @@ Route selection notes (see routes.txt route_type/route_short_name):
     the same physical track as their daytime route — since this script's
     streetcar output is meant to be the network riders know by name, we key
     off TTC's own published route numbers instead of route_type alone.
+  - Day buses are route_type 3 ("Bus") with a numeric short_name under
+    300 — TTC's entire regular daytime network (~150 routes), deliberately
+    excluding the 300-399 Blue Night series below.
   - Night buses are route_type 3 ("Bus") with a short_name in 300-399 —
     this deliberately excludes the 3xx *streetcar* variants above, which
     are a different vehicle type despite sharing the numbering scheme.
@@ -54,7 +58,8 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "app" / "data"
 STATIONS_JSON_PATH = REPO_ROOT / "src" / "data" / "ttc-stations.json"
 
 STREETCAR_ROUTE_SHORT_NAMES = {"501", "503", "504", "505", "506", "509", "510", "511", "512"}
-NIGHT_BUS_ROUTE_TYPE = "3"
+BUS_ROUTE_TYPE = "3"
+DAY_BUS_RANGE = range(0, 300)
 NIGHT_BUS_RANGE = range(300, 400)
 
 # A surface stop within this distance of a subway station is treated as an
@@ -63,6 +68,7 @@ INTERCHANGE_RADIUS_METERS = 150.0
 EARTH_RADIUS_M = 6_371_000.0
 
 DEFAULT_STREETCAR_COLOR = "ED1C24"  # TTC official streetcar red
+DEFAULT_DAY_BUS_COLOR = "2563EB"  # bus blue — matches TTCMap.tsx's day-bus layer color
 DEFAULT_NIGHT_BUS_COLOR = "0054A6"  # TTC official Blue Night blue
 
 
@@ -87,23 +93,25 @@ def _load_gtfs_zip(source: str) -> zipfile.ZipFile:
     return zipfile.ZipFile(source)
 
 
-def _classify_routes(zf: zipfile.ZipFile) -> tuple[dict[str, dict], dict[str, dict]]:
-    """Return (streetcar_routes_by_id, night_bus_routes_by_id)."""
+def _classify_routes(zf: zipfile.ZipFile) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    """Return (streetcar_routes_by_id, day_bus_routes_by_id, night_bus_routes_by_id)."""
     streetcars: dict[str, dict] = {}
+    day_buses: dict[str, dict] = {}
     night_buses: dict[str, dict] = {}
     with _open_member(zf, "routes.txt") as f:
         for row in csv.DictReader(f):
             short_name = row["route_short_name"].strip()
             if short_name in STREETCAR_ROUTE_SHORT_NAMES:
                 streetcars[row["route_id"]] = row
-            elif (
-                row["route_type"] == NIGHT_BUS_ROUTE_TYPE
-                and short_name.isdigit()
-                and int(short_name) in NIGHT_BUS_RANGE
-            ):
+            elif row["route_type"] == BUS_ROUTE_TYPE and short_name.isdigit() and int(short_name) in DAY_BUS_RANGE:
+                day_buses[row["route_id"]] = row
+            elif row["route_type"] == BUS_ROUTE_TYPE and short_name.isdigit() and int(short_name) in NIGHT_BUS_RANGE:
                 night_buses[row["route_id"]] = row
-    print(f"  routes: {len(streetcars)} streetcar, {len(night_buses)} night bus", file=sys.stderr)
-    return streetcars, night_buses
+    print(
+        f"  routes: {len(streetcars)} streetcar, {len(day_buses)} day bus, {len(night_buses)} night bus",
+        file=sys.stderr,
+    )
+    return streetcars, day_buses, night_buses
 
 
 def _load_trips_for_routes(zf: zipfile.ZipFile, route_ids: set[str]) -> dict[str, dict]:
@@ -328,13 +336,15 @@ def main() -> None:
     zf = _load_gtfs_zip(args.gtfs_zip)
 
     print("Classifying routes ...", file=sys.stderr)
-    streetcar_routes, night_bus_routes = _classify_routes(zf)
+    streetcar_routes, day_bus_routes, night_bus_routes = _classify_routes(zf)
 
     print("Loading trips ...", file=sys.stderr)
     streetcar_trips = _load_trips_for_routes(zf, set(streetcar_routes))
+    day_bus_trips = _load_trips_for_routes(zf, set(day_bus_routes))
     night_bus_trips = _load_trips_for_routes(zf, set(night_bus_routes))
     print(
-        f"  trips: {len(streetcar_trips)} streetcar, {len(night_bus_trips)} night bus",
+        f"  trips: {len(streetcar_trips)} streetcar, {len(day_bus_trips)} day bus, "
+        f"{len(night_bus_trips)} night bus",
         file=sys.stderr,
     )
 
@@ -342,11 +352,20 @@ def main() -> None:
     streetcars_geojson = _build_route_feature_collection(
         zf, streetcar_routes, streetcar_trips, DEFAULT_STREETCAR_COLOR
     )
+    print("Building day bus shapes (this is the biggest network — ~150 routes) ...", file=sys.stderr)
+    day_buses_geojson = _build_route_feature_collection(
+        zf, day_bus_routes, day_bus_trips, DEFAULT_DAY_BUS_COLOR
+    )
     print("Building night bus shapes ...", file=sys.stderr)
     night_buses_geojson = _build_route_feature_collection(
         zf, night_bus_routes, night_bus_trips, DEFAULT_NIGHT_BUS_COLOR
     )
 
+    # Day-bus stops are deliberately not added to surface_stops.json — that
+    # file backs the streetcar/night-bus "stops" overlays specifically; the
+    # day-bus layer this script adds is a line-only overlay (see
+    # TTCMap.tsx), so scanning stop_times.txt again for ~150 more routes'
+    # worth of stops isn't needed here.
     print("Scanning stop_times.txt for served stops (this is the slow part) ...", file=sys.stderr)
     streetcar_trip_routes = _trip_route_short_names(streetcar_routes, streetcar_trips)
     night_bus_trip_routes = _trip_route_short_names(night_bus_routes, night_bus_trips)
@@ -355,11 +374,13 @@ def main() -> None:
     surface_stops = _build_surface_stops(zf, stop_route_info)
 
     (DATA_DIR / "streetcars.geojson").write_text(json.dumps(streetcars_geojson, indent=2))
+    (DATA_DIR / "day_buses.geojson").write_text(json.dumps(day_buses_geojson, indent=2))
     (DATA_DIR / "night_buses.geojson").write_text(json.dumps(night_buses_geojson, indent=2))
     (DATA_DIR / "surface_stops.json").write_text(json.dumps(surface_stops, indent=2))
 
     print(
         f"Wrote {len(streetcars_geojson['features'])} streetcar shapes, "
+        f"{len(day_buses_geojson['features'])} day bus shapes, "
         f"{len(night_buses_geojson['features'])} night bus shapes, "
         f"{len(surface_stops)} surface stops to {DATA_DIR}",
         file=sys.stderr,

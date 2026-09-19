@@ -2,6 +2,7 @@ import { BACKEND_URL } from "./constants";
 import type {
   ActiveSlowZone,
   AlertsResponse,
+  DetoursResponse,
   RouteSummary,
   SlowZonesResponse,
   SurfaceRoutesGeoJSON,
@@ -75,11 +76,36 @@ export async function getAlerts(): Promise<AlertsResponse> {
   return response.json() as Promise<AlertsResponse>;
 }
 
+/** Active bus/streetcar DETOUR/MODIFIED_SERVICE/NO_SERVICE alerts, for the
+ * live detours panel (see components/alerts/DetourPanel.tsx). */
+export async function getDetours(): Promise<DetoursResponse> {
+  const response = await fetch(`${BACKEND_URL}/api/detours`);
+
+  if (!response.ok) {
+    throw new Error(`Detours request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<DetoursResponse>;
+}
+
 export async function getStreetcars(): Promise<SurfaceRoutesGeoJSON> {
   const response = await fetch(`${BACKEND_URL}/transit/surface/streetcars`);
 
   if (!response.ok) {
     throw new Error(`Streetcars request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<SurfaceRoutesGeoJSON>;
+}
+
+/** The full daytime bus network (~150 routes) — a much larger payload than
+ * streetcars/night buses, so callers should only fetch this once the rider
+ * actually enables the "Day Buses" map layer, not on initial page load. */
+export async function getDayBuses(): Promise<SurfaceRoutesGeoJSON> {
+  const response = await fetch(`${BACKEND_URL}/transit/surface/day-buses`);
+
+  if (!response.ok) {
+    throw new Error(`Day buses request failed with status ${response.status}`);
   }
 
   return response.json() as Promise<SurfaceRoutesGeoJSON>;

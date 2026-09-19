@@ -1,4 +1,4 @@
-"""Static TTC streetcar network + Blue Night bus route/stop data.
+"""Static TTC streetcar, daytime bus, and Blue Night bus route/stop data.
 
 Generated offline by scripts/ingest_surface_gtfs.py from the City of
 Toronto's GTFS feed. Genuinely static (regenerated manually, not on a live
@@ -52,12 +52,17 @@ def _load_stops_as_geojson(filename: str) -> dict:
 
 
 _STREETCARS_GEOJSON = _load_geojson("streetcars.geojson")
+_DAY_BUSES_GEOJSON = _load_geojson("day_buses.geojson")
 _NIGHT_BUSES_GEOJSON = _load_geojson("night_buses.geojson")
 _SURFACE_STOPS_GEOJSON = _load_stops_as_geojson("surface_stops.json")
 
 
 def get_streetcars_geojson() -> dict:
     return _STREETCARS_GEOJSON
+
+
+def get_day_buses_geojson() -> dict:
+    return _DAY_BUSES_GEOJSON
 
 
 def get_night_buses_geojson() -> dict:

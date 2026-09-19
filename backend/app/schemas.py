@@ -77,6 +77,46 @@ class AlertsResponse(BaseModel):
     source: str
 
 
+class DetourStop(BaseModel):
+    """One stop an active detour names as closed/bypassed, resolved to real
+    coordinates (see detour_service._resolve_stop_details) so the map can
+    place a marker for it — a streetcar/bus stop has no equivalent in our
+    subway station-id registry, so this carries its own lat/lon directly."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    name: str
+    lat: float
+    lon: float
+
+
+class DetourSummary(BaseModel):
+    """One active bus/streetcar DETOUR/MODIFIED_SERVICE/NO_SERVICE alert —
+    see detour_service.get_active_surface_detours for GET /api/detours."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    route_id: Optional[str] = Field(default=None, alias="routeId")
+    route_short_name: Optional[str] = Field(default=None, alias="routeShortName")
+    route_ids: list[str] = Field(default_factory=list, alias="routeIds")
+    header: str
+    description: str
+    summary: str
+    effect: str
+    affected_stop_ids: list[str] = Field(default_factory=list, alias="affectedStopIds")
+    # A subset of affected_stop_ids when the routing DB doesn't have a
+    # matching row for one (a stale/renamed stop_id in a live alert).
+    affected_stops: list[DetourStop] = Field(default_factory=list, alias="affectedStops")
+
+
+class DetoursResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    detours: list[DetourSummary]
+
+
 class CommuteStep(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
