@@ -175,6 +175,28 @@ export interface ItineraryLeg {
   durationMinutes: number;
   departureTime: string;
   arrivalTime: string;
+  /** The original static-schedule times, before any live/kinematic delay
+   * shift — departureTime/arrivalTime above reflect the best available
+   * estimate (live-adjusted when isLive is true), so these are what a "was
+   * X, now Y" strikethrough display diffs against for a delayed leg. */
+  scheduledDepartureTime: string;
+  scheduledArrivalTime: string;
+  /** True when departureTime/arrivalTime reflect an actual live GTFS-RT
+   * TripUpdates reading for this specific leg, rather than the static
+   * schedule or a flat detour-penalty estimate. Only ever true for a
+   * bus/streetcar leg departing within router.py's 45-minute live-ETA
+   * horizon (see LIVE_ETA_HORIZON_MINUTES). */
+  isLive: boolean;
+  /** True when this leg's departure was soon enough that a live reading was
+   * attempted, but the live feed itself had gone stale/unreachable (a
+   * system-wide "ghost bus") — the schedule is kept as the best available
+   * time, but flagged distinctly from a route that simply has no live
+   * vehicle tracked right now, so the UI can show "Scheduled (Tracking
+   * Unavailable)" instead of a plain "Scheduled" badge. */
+  trackingUnavailable: boolean;
+  /** This leg's own delay in seconds (live or kinematic) — 0 for an
+   * on-time or non-surface leg. */
+  delaySeconds: number;
   /** [lon, lat] pairs in travel order — a straight line for a walk leg, the
    * actual boarded-to-alighted stop sequence for a transit leg. */
   path: Coordinates[];

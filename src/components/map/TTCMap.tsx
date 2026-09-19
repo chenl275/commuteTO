@@ -196,15 +196,26 @@ interface LayerVisibility {
   nightBuses: boolean;
 }
 
-// Subways and streetcars shown by default; day buses and night buses stay
-// opt-in — day buses because the full network is a much heavier layer to
-// render (see DAY_BUSES_MIN_ZOOM and getDayBuses' lazy fetch), night buses
-// because they're only relevant during the overnight window most visitors
-// aren't browsing in.
+// TTC's Blue Night network uses the 300-399 route-number range (matching
+// backend/scripts/ingest_surface_gtfs.py's own NIGHT_BUS_RANGE) — an
+// ordinary daytime bus leg (e.g. "29") shares CommuteStep's generic "bus"
+// mode with a night one (e.g. "320"), so the mode alone can't tell them
+// apart (see the commuteResult layer-auto-sync below).
+function isNightBusRouteNumber(routeNumber: string): boolean {
+  const numeric = Number(routeNumber);
+  return !Number.isNaN(numeric) && numeric >= 300 && numeric < 400;
+}
+
+// Subways, streetcars, and day buses shown by default; night buses stay
+// opt-in — they're only relevant during the overnight window most visitors
+// aren't browsing in. Day buses used to default off too (the full ~150-route
+// network is the heaviest layer to render, see DAY_BUSES_MIN_ZOOM), but the
+// lazy-fetch effect below already keeps that cost paid only once per
+// session regardless of whether it's on by default or toggled on later.
 const DEFAULT_LAYER_VISIBILITY: LayerVisibility = {
   subways: true,
   streetcars: true,
-  dayBuses: false,
+  dayBuses: true,
   nightBuses: false,
 };
 
@@ -1046,25 +1057,47 @@ export default function TTCMap({
 
   // A night-network result (e.g. 320 Yonge overnight) is only meaningful in
   // the context of the Blue Night background layer — auto-check that toggle
-  // so the checkbox and what's on the map never disagree. This adjusts state
-  // during render (React's recommended pattern for "derive state from a prop
-  // change") rather than in an effect, since it only needs to run once per
-  // actual commuteResult change, not resync an external system every render.
+  // so the checkbox and what's on the map never disagree; a plain daytime
+  // bus result gets the same treatment for the Day Buses toggle. This
+  // adjusts state during render (React's recommended pattern for "derive
+  // state from a prop change") rather than in an effect, since it only
+  // needs to run once per actual commuteResult change, not resync an
+  // external system every render.
   const [lastSyncedCommuteResult, setLastSyncedCommuteResult] = useState(commuteResult);
   if (commuteResult !== lastSyncedCommuteResult) {
     setLastSyncedCommuteResult(commuteResult);
-    if (commuteResult?.steps.some((step) => step.mode === "bus") && !layerVisibility.nightBuses) {
-      setLayerVisibility((previous) => ({ ...previous, nightBuses: true }));
+    // CommuteStep's mode is just "bus" for both networks (see
+    // types/traffic.ts) — TTC's own 300-399 Blue Night route-number range
+    // (matching backend/scripts/ingest_surface_gtfs.py's NIGHT_BUS_RANGE)
+    // is what actually tells a night leg (e.g. "320") apart from an
+    // ordinary daytime one (e.g. "29"). Previously this checked mode alone,
+    // which meant an everyday daytime-bus commute incorrectly force-enabled
+    // the Blue Night overlay instead of (or as well as) Day Buses.
+    const usesNightBus =
+      commuteResult?.steps.some((step) => step.mode === "bus" && isNightBusRouteNumber(step.routeNumber)) ?? false;
+    const usesDayBus =
+      commuteResult?.steps.some((step) => step.mode === "bus" && !isNightBusRouteNumber(step.routeNumber)) ?? false;
+    if ((usesNightBus && !layerVisibility.nightBuses) || (usesDayBus && !layerVisibility.dayBuses)) {
+      setLayerVisibility((previous) => ({
+        ...previous,
+        nightBuses: previous.nightBuses || usesNightBus,
+        dayBuses: previous.dayBuses || usesDayBus,
+      }));
     }
   }
 
   const slowZonesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const disruptionsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const streetcarsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
-  // Unlike streetcars/night buses (fetched unconditionally below), the full
-  // day-bus network is a much heavier payload — only fetched once the rider
-  // actually checks "Day Buses" (see the effect further down), and cached
-  // here afterward so unchecking/rechecking never re-fetches it.
+  // The full day-bus network is the heaviest payload of any layer here —
+  // fetched by its own gated effect (further down) keyed off
+  // layerVisibility.dayBuses rather than bundled into the unconditional
+  // fetch below, and cached here afterward so toggling it off and back on
+  // never re-fetches it. That effect fires as soon as dayBuses is true,
+  // which happens immediately on mount now that it's on by default (see
+  // DEFAULT_LAYER_VISIBILITY) — this ref just decouples "when the data
+  // arrives" from "when the map/source is ready for it" (see style.load
+  // below), regardless of which happens first.
   const dayBusesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const hasFetchedDayBusesRef = useRef(false);
   const nightBusesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
@@ -1115,25 +1148,39 @@ export default function TTCMap({
     };
   }, []);
 
-  // Fetch the day-bus network the first time the rider actually checks
-  // "Day Buses" — deliberately not bundled into the effect above, since
-  // that ~150-route payload is far heavier than streetcars/night buses and
-  // most visitors will never enable it (see DEFAULT_LAYER_VISIBILITY).
+  // Fetch the day-bus network as soon as "Day Buses" is checked — on by
+  // default (see DEFAULT_LAYER_VISIBILITY), so in practice this fires right
+  // on mount. Kept as its own gated effect rather than bundled into the one
+  // above (which always fetches unconditionally) so a rider who unchecks it
+  // doesn't pay for a network the map isn't even showing, and so it still
+  // only ever fetches once per session (hasFetchedDayBusesRef) if they
+  // uncheck and recheck it later.
   useEffect(() => {
     if (!layerVisibility.dayBuses || hasFetchedDayBusesRef.current) return;
-    hasFetchedDayBusesRef.current = true;
     let cancelled = false;
 
     getDayBuses()
       .then((geojson) => {
         if (cancelled) return;
+        // Claimed only once the fetch actually lands, not before it starts
+        // (see below) — this used to be set synchronously right here,
+        // which meant React StrictMode's dev-only double-invoke (mount ->
+        // cleanup -> mount, run back to back on every first mount) could
+        // permanently starve the layer of data: the first invocation
+        // claimed the guard and then got cancelled by its own cleanup
+        // before the fetch resolved, and the second invocation saw the
+        // guard already claimed and never started a fetch of its own —
+        // net result, no invocation's data ever lands. Each invocation now
+        // tracks its own `cancelled` independently, so whichever one
+        // actually finishes claims the guard and applies its data,
+        // regardless of StrictMode or fetch-ordering.
+        hasFetchedDayBusesRef.current = true;
         dayBusesDataRef.current = geojson;
         (mapRef.current?.getSource(DAY_BUSES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(geojson);
       })
       .catch(() => {
-        // Let a later toggle-off/on retry the fetch instead of leaving the
-        // layer permanently empty for the rest of this session.
-        hasFetchedDayBusesRef.current = false;
+        // Guard was never claimed on this path — a later toggle-off/on (or
+        // the next render, if still checked) naturally retries.
       });
 
     return () => {
@@ -1564,6 +1611,22 @@ export default function TTCMap({
     layerVisibilityRef.current = layerVisibility;
     const map = mapRef.current;
     if (!map) return;
+
+    // Ordinarily style.load (see the map-creation effect above) is what
+    // adds every custom layer, reading layerVisibilityRef for its initial
+    // visibility — applyLayerVisibility below then just flips an existing
+    // layer's visibility on toggle. Day buses is the one layer whose data
+    // can already be sitting in dayBusesDataRef before that first
+    // style.load ever runs (its own fetch effect isn't gated on the map
+    // being ready — see that effect above), so if this fires while the
+    // layer still doesn't exist yet, add it directly with whatever data is
+    // already in hand instead of only ever relying on style.load to catch
+    // up. Guarded on isStyleLoaded() since addLayer/addSource throw if
+    // called before the style itself has finished loading.
+    if (layerVisibility.dayBuses && map.isStyleLoaded() && !map.getLayer(DAY_BUSES_LAYER_ID)) {
+      addDayBusLayer(map, dayBusesDataRef.current, true);
+    }
+
     applyLayerVisibility(map, layerVisibility);
   }, [layerVisibility]);
 

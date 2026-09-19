@@ -287,6 +287,11 @@ def _build_route_summary_fields(itinerary, base_date, label: str) -> dict:
                 duration_minutes=round(leg.duration_minutes, 1),
                 departure_time=_to_clock_time(base_date, leg.departure_sec).isoformat(),
                 arrival_time=_to_clock_time(base_date, leg.arrival_sec).isoformat(),
+                scheduled_departure_time=_to_clock_time(base_date, leg.scheduled_departure_sec).isoformat(),
+                scheduled_arrival_time=_to_clock_time(base_date, leg.scheduled_arrival_sec).isoformat(),
+                is_live=leg.is_live,
+                tracking_unavailable=leg.tracking_unavailable,
+                delay_seconds=round(leg.delay_seconds, 1),
                 path=leg.path,
             )
         )
@@ -436,7 +441,20 @@ async def get_transit_commute_estimate(request: TransitCommuteRequest) -> Transi
             origin_station, destination_station, line, hops, departure, origin_display, destination_display
         )
 
-    scheduled_minutes = hops * MINUTES_PER_STATION_HOP
+    # Real GTFS-scheduled travel time for this specific station pair —
+    # replaces the old flat "hops * MINUTES_PER_STATION_HOP" estimate, which
+    # assumed every inter-station hop takes the same time (it doesn't: real
+    # Line 1 hops alone range from ~1.1 to ~4.2 minutes depending on which
+    # stretch of the line, so a flat average could be off by 20-40%+ on a
+    # given trip — see router.py's get_subway_scheduled_duration_seconds).
+    # Only None when no matching trip exists at all (e.g. a request right at
+    # closing time), in which case the flat estimate is still a reasonable
+    # fallback rather than failing the request outright.
+    departure_sec = departure.hour * 3600 + departure.minute * 60 + departure.second
+    real_duration_seconds = router.get_subway_scheduled_duration_seconds(
+        line, origin_station["id"], destination_station["id"], departure_sec, departure.date()
+    )
+    scheduled_minutes = real_duration_seconds / 60.0 if real_duration_seconds is not None else hops * MINUTES_PER_STATION_HOP
 
     slow_zones = await get_slow_zones()
     zones_on_route = stations.zones_along_route(

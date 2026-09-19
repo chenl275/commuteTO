@@ -146,6 +146,27 @@ class ItineraryLeg(BaseModel):
     duration_minutes: float = Field(alias="durationMinutes")
     departure_time: str = Field(alias="departureTime")
     arrival_time: str = Field(alias="arrivalTime")
+    # The original static-schedule times, before any live/kinematic delay
+    # shift — departure_time/arrival_time above reflect the best available
+    # estimate (live-adjusted when is_live is true), so these are what a
+    # "was X, now Y" strikethrough display diffs against for a delayed leg.
+    scheduled_departure_time: str = Field(alias="scheduledDepartureTime")
+    scheduled_arrival_time: str = Field(alias="scheduledArrivalTime")
+    # True when departure_time/arrival_time reflect an actual live GTFS-RT
+    # TripUpdates reading for this specific leg (see router.py's
+    # surface_realtime_service.get_live_departure integration) rather than
+    # the static schedule or a flat detour-penalty estimate.
+    is_live: bool = Field(default=False, alias="isLive")
+    # True when this leg's departure was soon enough to look for a live
+    # reading, but the live feed itself had gone stale/unreachable (a
+    # system-wide "ghost bus") — the schedule is kept as the best available
+    # time, flagged distinctly from a route that simply has no live vehicle
+    # tracked right now, so the UI can show "Scheduled (Tracking
+    # Unavailable)" instead of a plain "Scheduled" badge.
+    tracking_unavailable: bool = Field(default=False, alias="trackingUnavailable")
+    # This leg's own delay in seconds (live or kinematic) — 0 for an
+    # on-time or non-surface leg.
+    delay_seconds: float = Field(default=0.0, alias="delaySeconds")
     # [lon, lat] pairs in travel order — a straight line for a walk leg, the
     # actual boarded-to-alighted stop sequence for a transit leg. Matches the
     # [lon, lat] convention used everywhere else in this codebase (GeoJSON).

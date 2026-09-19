@@ -99,8 +99,10 @@ export async function getStreetcars(): Promise<SurfaceRoutesGeoJSON> {
 }
 
 /** The full daytime bus network (~150 routes) — a much larger payload than
- * streetcars/night buses, so callers should only fetch this once the rider
- * actually enables the "Day Buses" map layer, not on initial page load. */
+ * streetcars/night buses. TTCMap fetches this once per session, gated on
+ * the "Day Buses" layer being checked (on by default, see TTCMap.tsx's
+ * DEFAULT_LAYER_VISIBILITY) rather than unconditionally on mount, so it's
+ * skipped entirely if a rider unchecks it before the fetch effect runs. */
 export async function getDayBuses(): Promise<SurfaceRoutesGeoJSON> {
   const response = await fetch(`${BACKEND_URL}/transit/surface/day-buses`);
 

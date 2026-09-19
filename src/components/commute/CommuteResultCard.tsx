@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { formatStationLabel } from "@/lib/stationDisplay";
 import { findStationByName } from "@/lib/geo/subwayGeoJSON";
+import LegArrivalTime from "@/components/itinerary/LegArrivalTime";
 import type { AlertCategory, ItineraryLeg, RouteSummary, ServiceAlert, TransitCommuteResponse } from "@/types/traffic";
 
 interface CommuteResultCardProps {
@@ -9,28 +10,6 @@ interface CommuteResultCardProps {
   /** Fired when the rider picks a different stacked route card — lets the
    * parent re-highlight the newly selected route on TTCMap. */
   onSelectRoute?: (route: RouteSummary) => void;
-}
-
-const DELAY_BADGE_STYLES = {
-  none: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
-  delay: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
-} as const;
-
-/** "No Track Slowdown" only when there's truly nothing to report — any
- * nonzero delay (even a few seconds), whether observed live or
- * kinematically modeled, gets a precise "+X secs"/"+X mins" badge instead
- * of being rounded away. Labeled "Track Slowdown" (not just "Delay") so
- * it reads as distinct from the separate "Service Alert Delay" badge below. */
-function formatDelayBadge(delaySeconds: number): { label: string; hasDelay: boolean } {
-  if (delaySeconds <= 0) {
-    return { label: "No Track Slowdown", hasDelay: false };
-  }
-  if (delaySeconds < 60) {
-    const secs = Math.round(delaySeconds);
-    return { label: `+${secs} sec${secs === 1 ? "" : "s"} Track Slowdown`, hasDelay: true };
-  }
-  const mins = Math.round(delaySeconds / 60);
-  return { label: `+${mins} min${mins === 1 ? "" : "s"} Track Slowdown`, hasDelay: true };
 }
 
 // Upcoming (not-yet-active) notices sort last regardless of category; among
@@ -101,10 +80,76 @@ function formatMinutes(minutes: number): string {
   return `${rounded} min${rounded === 1 ? "" : "s"}`;
 }
 
+/** "1 hr 46 min" / "46 min" — the large primary ETA figure in the
+ * consolidated route header, spelled out since it's the single most
+ * prominent number on the card. */
+function formatDurationLong(minutes: number): string {
+  const total = Math.round(minutes);
+  const hrs = Math.floor(total / 60);
+  const mins = total % 60;
+  if (hrs <= 0) return `${mins} min${mins === 1 ? "" : "s"}`;
+  return mins > 0 ? `${hrs} hr ${mins} min` : `${hrs} hr`;
+}
+
+/** "1h 45m" / "45m" — compact form for the header's muted metadata subline
+ * (e.g. "Scheduled 1h 45m", "+1m delay") and the delay-summary bar's
+ * breakdown clause, where the long spelled-out form would be too noisy. */
+function formatDurationCompact(minutes: number): string {
+  const total = Math.round(minutes);
+  const hrs = Math.floor(total / 60);
+  const mins = total % 60;
+  if (hrs <= 0) return `${mins}m`;
+  return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+}
+
 function formatClockTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+interface DelaySummary {
+  totalMinutes: number;
+  parts: string[];
+}
+
+/** Consolidates every delay source on a route into one honest total plus a
+ * breakdown clause — e.g. "+21 mins delay · 11m track slowdown, 10m
+ * streetcar congestion" — instead of the separate stacked minute-badges this
+ * replaces. `totalMinutes` is always `totalDurationMinutes -
+ * scheduledDurationMinutes` (the same delta the header's own ETA is built
+ * from, so the two numbers never disagree), not a re-sum of the parts below.
+ *
+ * `slowZoneDelayMinutes` doubles as "total delay across every leg" for a
+ * multi-modal itinerary (subway + surface combined — see router.py's
+ * _augment_with_live_delays) and as a genuinely subway-only "track slowdown"
+ * figure on the subway-only fast path, where streetcar/bus delay is always
+ * 0. Subtracting out the known streetcar/bus subsets isolates the real
+ * track/kinematic portion in both cases without double-counting (and is a
+ * no-op on the subway-only path, where there's nothing to subtract). */
+function buildDelaySummary(route: RouteSummary): DelaySummary {
+  const totalMinutes = Math.max(0, route.totalDurationMinutes - route.scheduledDurationMinutes);
+  const trackSlowdownMinutes = Math.max(
+    0,
+    route.slowZoneDelayMinutes - route.streetcarDelayMinutes - route.busDelayMinutes
+  );
+  const parts: string[] = [];
+  if (Math.round(trackSlowdownMinutes) > 0) {
+    parts.push(`${formatDurationCompact(trackSlowdownMinutes)} track slowdown`);
+  }
+  if (Math.round(route.streetcarDelayMinutes) > 0) {
+    parts.push(`${formatDurationCompact(route.streetcarDelayMinutes)} streetcar congestion`);
+  }
+  if (Math.round(route.busDelayMinutes) > 0) {
+    parts.push(`${formatDurationCompact(route.busDelayMinutes)} traffic delay`);
+  }
+  if (Math.round(route.alertDelayMinutes) > 0) {
+    parts.push(`${formatDurationCompact(route.alertDelayMinutes)} service alert`);
+  }
+  if (Math.round(route.detourDelayMinutes) > 0) {
+    parts.push(`${formatDurationCompact(route.detourDelayMinutes)} detour delay`);
+  }
+  return { totalMinutes: Math.round(totalMinutes), parts };
 }
 
 // Populated by the backend's multi-modal (walk + bus + streetcar + subway)
@@ -128,17 +173,48 @@ function formatDestinationLabel(name: string): string {
   return findStationByName(name) ? formatStationLabel(name) : name;
 }
 
-/** e.g. "Line 1 Southbound to Union Station" (subway), "506 to Dundas West"
- * (streetcar/bus), or "Walk 117m to College Station". */
+/** e.g. "Line 1 Southbound to Union Station" (subway), "Northbound to
+ * Dundas West" (streetcar/bus — its route number renders as its own badge,
+ * see RouteNumberBadge, rather than inlined here), or "Walk 117m to College
+ * Station". */
 function formatItineraryLegHeadline(leg: ItineraryLeg): string {
   const destination = formatDestinationLabel(leg.toName);
   if (leg.mode === "walk") {
     const meters = leg.distanceMeters != null ? Math.round(leg.distanceMeters) : null;
     return `Walk${meters ? ` ${meters}m` : ""} to ${destination}`;
   }
-  const routePrefix = leg.mode === "subway" ? `Line ${leg.routeShortName ?? ""}` : leg.routeShortName ?? "";
-  const directionSuffix = leg.direction ? ` ${leg.direction}` : "";
-  return `${routePrefix}${directionSuffix} to ${destination}`;
+  if (leg.mode === "subway") {
+    const directionSuffix = leg.direction ? ` ${leg.direction}` : "";
+    return `Line ${leg.routeShortName ?? ""}${directionSuffix} to ${destination}`;
+  }
+  const directionPrefix = leg.direction ? `${leg.direction} ` : "";
+  return `${directionPrefix}to ${destination}`;
+}
+
+// TTC's own numbering for a peak/all-day "Express" service (e.g. 929
+// Dufferin Express, 939 Finch Express) — see backend/scripts/
+// ingest_surface_gtfs.py's identical DAY_BUS_RANGE/NIGHT_BUS_RANGE split,
+// which this 900+ convention sits above.
+function isExpressRoute(routeShortName: string | null): boolean {
+  const numeric = Number(routeShortName);
+  return routeShortName !== null && !Number.isNaN(numeric) && numeric >= 900;
+}
+
+/** A bus/streetcar leg's route number as its own small badge — separated
+ * out from the headline text (see formatItineraryLegHeadline) so a 900+
+ * express route can render in TTC's own express green rather than being
+ * just another word in the sentence. */
+function RouteNumberBadge({ leg }: { leg: ItineraryLeg }) {
+  if ((leg.mode !== "bus" && leg.mode !== "streetcar") || !leg.routeShortName) return null;
+  return (
+    <span
+      className={`mr-1.5 inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white ${
+        isExpressRoute(leg.routeShortName) ? "bg-[#00853F]" : "bg-neutral-600 dark:bg-white/20"
+      }`}
+    >
+      {leg.routeShortName}
+    </span>
+  );
 }
 
 /** e.g. "4 stops" — the muted trailing detail joined onto the headline with
@@ -177,8 +253,9 @@ interface RouteCardProps {
  * result.alternativeRoutes. Selecting a non-active card re-highlights that
  * route's path on TTCMap (see CommuteResultCard's onSelectRoute). */
 function RouteCard({ route, isSelected, onSelect }: RouteCardProps) {
-  const delayBadge = formatDelayBadge(route.slowZoneDelaySeconds);
   const isLiveTelemetry = route.telemetrySource === "gtfs_realtime";
+  const delaySummary = buildDelaySummary(route);
+  const isDelayed = delaySummary.totalMinutes > 0;
 
   // Split activeAlertsOnRoute so its "upcoming" entries join the one
   // combined, collapsible Upcoming Notices section below instead of a
@@ -200,20 +277,36 @@ function RouteCard({ route, isSelected, onSelect }: RouteCardProps) {
           : "border-neutral-200 bg-neutral-50 hover:border-neutral-300 dark:border-white/10 dark:bg-white/5 dark:hover:border-white/20"
       }`}
     >
-      <div className="mb-2.5 flex items-center justify-between gap-2">
+      <div className="mb-1 flex items-start justify-between gap-3">
         <span
-          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${
-            isSelected
-              ? "bg-red-600 text-white"
+          className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${
+            route.label === "Fastest"
+              ? "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300"
               : "bg-neutral-200 text-neutral-600 dark:bg-white/10 dark:text-white/60"
           }`}
         >
-          {route.label === "Fastest" ? "⚡ Fastest" : "🔀 Alternative Route"}
+          {route.label === "Fastest" ? "Fastest" : "Alternative"}
         </span>
-        <span className="text-xs font-bold text-neutral-700 dark:text-white/80">
-          {route.label === "Fastest" ? formatMinutes(route.totalDurationMinutes) : `Alternative Route · ${formatMinutes(route.totalDurationMinutes)}`}
+        <span className="text-2xl font-bold leading-none text-neutral-900 dark:text-white">
+          {formatDurationLong(route.totalDurationMinutes)}
         </span>
       </div>
+      <p className="mb-2.5 text-xs text-neutral-500 dark:text-white/50">
+        Arrives{" "}
+        <span className="font-medium text-neutral-700 dark:text-white/70" suppressHydrationWarning>
+          {formatClockTime(route.arrivalTime)}
+        </span>
+        {" · Scheduled "}
+        {formatDurationCompact(route.scheduledDurationMinutes)}
+        {" · "}
+        {isDelayed ? (
+          <span className="font-semibold text-amber-700 dark:text-amber-400">
+            +{formatDurationCompact(delaySummary.totalMinutes)} delay
+          </span>
+        ) : (
+          <span className="font-semibold text-emerald-700 dark:text-emerald-400">On schedule</span>
+        )}
+      </p>
 
       {activeAlerts.length > 0 && (
         <div className="mb-3 flex flex-col gap-2">
@@ -265,25 +358,6 @@ function RouteCard({ route, isSelected, onSelect }: RouteCardProps) {
         </details>
       )}
 
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-white/50">
-            Scheduled Time
-          </p>
-          <p className="text-lg font-bold text-neutral-900 dark:text-white">
-            {formatMinutes(route.scheduledDurationMinutes)}
-          </p>
-        </div>
-        <div className="text-right">
-          <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-white/50">
-            Estimated Travel Time
-          </p>
-          <p className="text-lg font-bold text-neutral-900 dark:text-white">
-            {formatMinutes(route.totalDurationMinutes)}
-          </p>
-        </div>
-      </div>
-
       {route.itinerary.length > 0 ? (
         <ol className="mt-2 flex flex-col divide-y divide-neutral-200/70 dark:divide-white/10">
           {route.itinerary
@@ -302,14 +376,19 @@ function RouteCard({ route, isSelected, onSelect }: RouteCardProps) {
                       forcing an ellipsis when the line is long (e.g. "Line 1
                       Southbound to Vaughan Metropolitan Centre Station"). */}
                   <span className="min-w-0 flex-1 font-semibold leading-snug break-words text-neutral-800 dark:text-white/90">
+                    <RouteNumberBadge leg={leg} />
                     {formatItineraryLegHeadline(leg)}
                     {detail && (
                       <span className="font-normal text-neutral-500 dark:text-white/50"> · {detail}</span>
                     )}
                   </span>
-                  <span className="shrink-0 whitespace-nowrap text-right text-neutral-400 dark:text-white/40">
-                    {formatMinutes(leg.durationMinutes)}
-                  </span>
+                  <div className="shrink-0 text-right text-neutral-400 dark:text-white/40">
+                    {leg.mode === "bus" || leg.mode === "streetcar" ? (
+                      <LegArrivalTime leg={leg} />
+                    ) : (
+                      <span className="whitespace-nowrap">{formatMinutes(leg.durationMinutes)}</span>
+                    )}
+                  </div>
                 </li>
               );
             })}
@@ -320,64 +399,30 @@ function RouteCard({ route, isSelected, onSelect }: RouteCardProps) {
         </p>
       )}
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span
-          className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
-            DELAY_BADGE_STYLES[delayBadge.hasDelay ? "delay" : "none"]
-          }`}
-        >
-          {delayBadge.label}
-        </span>
-        {isLiveTelemetry && (
-          <span
-            className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-            title="This delay is from live train transponder data, not a modeled estimate."
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            Live Telemetry
-          </span>
-        )}
-        {route.alertDelayMinutes > 0 && (
-          <span
-            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${
-              route.isDisrupted
-                ? "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300"
-                : "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
-            }`}
-          >
-            +{formatMinutes(route.alertDelayMinutes)} Service Alert Delay
-          </span>
-        )}
-        {route.detourDelayMinutes > 0 && (
-          <span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700 dark:bg-red-500/15 dark:text-red-300">
-            +{formatMinutes(route.detourDelayMinutes)} Detour Delay
-          </span>
-        )}
-        {route.streetcarDelayMinutes > 0 && (
-          <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
-            +{formatMinutes(route.streetcarDelayMinutes)} Streetcar Delay
-          </span>
-        )}
-        {route.busDelayMinutes > 0 && (
-          <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
-            +{formatMinutes(route.busDelayMinutes)} Traffic Delay
-          </span>
-        )}
-        <p className="ml-auto text-xs text-neutral-500 dark:text-white/50">
-          Arriving around{" "}
-          {/* toLocaleTimeString formats in the viewer's local timezone, which
-              can differ from wherever this was rendered — this card only ever
-              mounts after a client-side fetch response (never during the
-              initial SSR/hydration pass), but suppress defensively in case
-              that ever changes (e.g. a future server-prefetched result). */}
-          <span
-            className="font-semibold text-neutral-800 dark:text-white"
-            suppressHydrationWarning
-          >
-            {formatClockTime(route.arrivalTime)}
-          </span>
-        </p>
-      </div>
+      {(isDelayed || isLiveTelemetry) && (
+        <div className="mt-3 flex flex-col gap-2">
+          {isDelayed && (
+            <div className="flex items-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-100">
+              <span aria-hidden="true">⚠️</span>
+              <span>
+                <span className="font-semibold">+{formatMinutes(delaySummary.totalMinutes)} delay</span>
+                {delaySummary.parts.length > 0 && (
+                  <span className="text-amber-800/80 dark:text-amber-200/70"> · {delaySummary.parts.join(", ")}</span>
+                )}
+              </span>
+            </div>
+          )}
+          {isLiveTelemetry && (
+            <span
+              className="inline-flex w-fit items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+              title="This delay is from live train transponder data, not a modeled estimate."
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Live Telemetry
+            </span>
+          )}
+        </div>
+      )}
 
       {route.activeSlowZones.length > 0 && (
         <details className="group mt-3">
