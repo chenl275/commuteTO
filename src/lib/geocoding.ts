@@ -83,6 +83,11 @@ interface PhotonProperties {
   name?: string;
   housenumber?: string;
   street?: string;
+  /** Neighbourhood-level area, e.g. "Kensington Market" — finer-grained than
+   * `city`, used both as an extra disambiguation field for the token-split
+   * fallback (see featureMatchesToken) and to tell apart two same-named
+   * chain locations in the suggestion list (see formatPhotonAddress). */
+  locality?: string;
   city?: string;
   state?: string;
   country?: string;
@@ -91,6 +96,12 @@ interface PhotonProperties {
   countrycode?: string;
   osm_id?: number | string;
   osm_type?: string;
+  /** OSM's `highway=*` classification when this feature IS a street (only
+   * present on a `layer=street` reverse-geocode result, see
+   * fetchNearbyStreets) — e.g. "secondary" for Bathurst Street vs.
+   * "service" for the service laneway behind it. Used to tell a real,
+   * recognizable road apart from a minor service/pedestrian way. */
+  osm_value?: string;
 }
 
 interface PhotonFeature {
@@ -111,13 +122,21 @@ function formatStreetAddress(properties: PhotonProperties): string {
 }
 
 function formatPhotonAddress(properties: PhotonProperties): { title: string; subtitle: string } {
-  const streetAddress = formatStreetAddress(properties);
   if (properties.name) {
-    return { title: properties.name, subtitle: streetAddress };
+    // A neighbourhood/locality, when Photon has one, disambiguates two
+    // same-named chain locations ("which FreshCo?") right in the
+    // suggestion list — inserted between the street and city the way a
+    // Toronto address is normally read, e.g. "410 Bathurst St, Kensington
+    // Market, Toronto". May be replaced entirely by enrichPoiSubtitle below
+    // when the street itself turns out to be an unrecognizable laneway.
+    const streetPart = `${properties.housenumber ?? ""} ${properties.street ?? ""}`.trim();
+    const city = properties.city || "Toronto";
+    const parts = [streetPart, properties.locality, city].filter((part): part is string => !!part);
+    return { title: properties.name, subtitle: parts.join(", ") };
   }
   // No POI/landmark name — the address itself is the title, with nothing
   // more specific left to put underneath it.
-  return { title: streetAddress, subtitle: "" };
+  return { title: formatStreetAddress(properties), subtitle: "" };
 }
 
 function toGeocodeResult(feature: PhotonFeature, index: number): GeocodeResult {
@@ -132,12 +151,215 @@ function toGeocodeResult(feature: PhotonFeature, index: number): GeocodeResult {
   };
 }
 
+/** One raw Photon query, Toronto-biased and filtered down to real, in-city
+ * Canadian results (see searchAddresses's own docstring) — deliberately
+ * carries no `osm_tag` restriction, so a shop/amenity POI (a supermarket, a
+ * gym) comes back on equal footing with a plain street address; Photon
+ * returns every category by default and nothing here narrows that. */
+async function fetchPhotonFeatures(
+  query: string,
+  limit: number,
+  signal?: AbortSignal
+): Promise<PhotonFeature[]> {
+  const url = `${PHOTON_BASE_URL}?q=${encodeURIComponent(query)}&lat=${TORONTO_BIAS.lat}&lon=${TORONTO_BIAS.lon}&limit=${limit}&bbox=${TORONTO_BBOX_PARAM}`;
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    throw new Error(`Address search failed with status ${response.status}`);
+  }
+
+  const data = (await response.json()) as PhotonResponse;
+  return (data.features ?? []).filter(
+    (feature) =>
+      feature.properties.countrycode === "CA" &&
+      isWithinToronto(feature.geometry.coordinates[1], feature.geometry.coordinates[0]) &&
+      !isExcludedMunicipality(feature.properties.city)
+  );
+}
+
+/** Common spelling mismatches between what a rider types and how Photon's
+ * underlying OSM data is actually tagged — Canadian/British spelling
+ * ("Centre", "Theatre") for a generic word, or a plausible one-letter typo
+ * of an exact brand/street name ("FreshCo", "Bathurst"). Whole-word,
+ * case-insensitive. Only ever changes the query text sent to Photon as a
+ * fallback retry — never what's shown back to the rider, which always comes
+ * from the matched result's own real properties.
+ *
+ * Photon's hosted API has no fuzzy-matching mode to opt into for anything
+ * this list doesn't cover: it rejects an unrecognized `fuzzy` query param
+ * outright (`{"message": "Unknown query parameter 'fuzzy'."}`, confirmed
+ * live against photon.komoot.io), so this plain substitution list — not a
+ * fuzzy-search flag — is what actually stands in for Step B. */
+const SPELLING_CORRECTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bcenter\b/gi, "centre"],
+  [/\btheater\b/gi, "theatre"],
+  [/\bfresco\b/gi, "freshco"],
+  [/\bbathrust\b/gi, "bathurst"],
+];
+
+function applySpellingCorrections(query: string): string {
+  return SPELLING_CORRECTIONS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), query);
+}
+
+/** True if `token` shows up in one of a Photon result's own rider-facing
+ * fields (its POI name, street, or locality/city) — used by the token-split
+ * fallback below to confirm a same-anchor-word result is actually near the
+ * disambiguating word the rider typed ("bathurst" in "fresco bathurst"),
+ * not just any result that happens to share the anchor word. */
+function featureMatchesToken(feature: PhotonFeature, token: string): boolean {
+  const needle = token.toLowerCase();
+  const haystacks = [
+    feature.properties.name,
+    feature.properties.street,
+    feature.properties.locality,
+    feature.properties.city,
+  ];
+  return haystacks.some((value) => value?.toLowerCase().includes(needle));
+}
+
+/** OSM `highway=*` values that represent a minor service/pedestrian way
+ * rather than a real, recognizable arterial/collector/local road — a POI
+ * tagged with one of these as its own `street` (a supermarket whose nearest
+ * OSM way is its own loading-dock laneway, say) isn't a useful location
+ * label on its own. Checked against a `layer=street` reverse-geocode
+ * result's `osm_value` (see fetchNearbyStreets/fetchNearbyRealStreets). */
+const MINOR_ROAD_HIGHWAY_VALUES = new Set([
+  "service",
+  "track",
+  "path",
+  "footway",
+  "pedestrian",
+  "cycleway",
+  "steps",
+]);
+
+/** Name patterns that read as a minor laneway/alley purely from the text —
+ * checked first since it's free (no extra request) — before a POI's own
+ * `street` is treated as suspect enough to warrant the real reverse-geocode
+ * classification check in enrichPoiSubtitle. Deliberately doesn't include
+ * generic suffixes like "Place"/"Court"/"Crescent" that are also
+ * legitimate real street names in Toronto (e.g. "Grosvenor Place") — those
+ * only get re-checked when the POI has no housenumber either, which is the
+ * actual "College Place"-style case this whole feature is fixing. */
+const MINOR_ROAD_NAME_PATTERN = /\b(lane|laneway|mews|alley|walk|trail)\b/i;
+
+/** True when a POI's own listed `street` looks unreliable enough to be
+ * worth a real (reverse-geocode) classification check — missing entirely,
+ * a name that already reads as a laneway, or a generic-suffix street name
+ * with no housenumber (the exact "410 Bathurst St" POI tagged only to
+ * "College Place" case: a real numbered address never has this shape). */
+function looksLikeMinorRoad(properties: PhotonProperties): boolean {
+  if (!properties.street) return true;
+  if (MINOR_ROAD_NAME_PATTERN.test(properties.street)) return true;
+  return !properties.housenumber && /\b(place|court|crescent|circle|square)\b/i.test(properties.street);
+}
+
+/** Nearby streets (any classification), nearest first, via Photon's own
+ * reverse-geocode endpoint restricted to the "street" layer — used both to
+ * find a POI's real neighbouring arterial (fetchNearbyRealStreets) and to
+ * spatially confirm a rider-typed disambiguator names a street genuinely
+ * near a POI even when it isn't that POI's own listed `street` (see
+ * searchAddresses's Step C). Best-effort: an unreachable/erroring reverse
+ * lookup just yields no nearby streets rather than failing the whole search. */
+async function fetchNearbyStreets(lat: number, lon: number, signal?: AbortSignal): Promise<PhotonFeature[]> {
+  try {
+    const url = `${PHOTON_REVERSE_URL}?lat=${lat}&lon=${lon}&layer=street&limit=6`;
+    const response = await fetch(url, { signal });
+    if (!response.ok) return [];
+    const data = (await response.json()) as PhotonResponse;
+    return data.features ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Up to 2 nearby *real* (non-minor) street names for `feature`, nearest
+ * first, excluding its own listed street — the recognizable "Street A &
+ * Street B" cross-street pairing used to replace a POI's subtitle when its
+ * own `street` is an unrecognizable service laneway (see enrichPoiSubtitle). */
+async function fetchNearbyRealStreets(feature: PhotonFeature, signal?: AbortSignal): Promise<string[]> {
+  const [lon, lat] = feature.geometry.coordinates;
+  const nearby = await fetchNearbyStreets(lat, lon, signal);
+  const ownStreet = feature.properties.street?.toLowerCase();
+  const names: string[] = [];
+  for (const candidate of nearby) {
+    const name = candidate.properties.name;
+    if (!name || name.toLowerCase() === ownStreet) continue;
+    if (candidate.properties.osm_value && MINOR_ROAD_HIGHWAY_VALUES.has(candidate.properties.osm_value)) continue;
+    if (!names.includes(name)) names.push(name);
+    if (names.length === 2) break;
+  }
+  return names;
+}
+
+/** Replaces `result.subtitle` with a recognizable cross-street label (plus
+ * neighbourhood, when available) when `feature`'s own listed street looks
+ * like an unreliable service laneway — e.g. a FreshCo tagged only to
+ * "College Place" becomes "Bathurst Street & Nassau Street, Kensington
+ * Market" once its real nearby arterials are found. Leaves `result`
+ * untouched (still whatever formatPhotonAddress already produced) when
+ * the street looks fine, or when no better nearby street turns up. */
+async function enrichPoiSubtitle(result: GeocodeResult, feature: PhotonFeature, signal?: AbortSignal): Promise<void> {
+  if (!feature.properties.name || !looksLikeMinorRoad(feature.properties)) return;
+
+  const realStreets = await fetchNearbyRealStreets(feature, signal);
+  if (realStreets.length === 0) return;
+
+  const parts = [realStreets.join(" & "), feature.properties.locality, feature.properties.city || "Toronto"].filter(
+    (part): part is string => !!part
+  );
+  result.subtitle = parts.join(", ");
+}
+
+/** True if a rider-typed disambiguator word names a street genuinely near
+ * `feature`, even when it isn't that POI's own listed `street` — the
+ * spatial counterpart to featureMatchesToken's plain text check, for a POI
+ * tagged to a minor laneway (e.g. "College Place") that's still right next
+ * to the named street the rider actually typed ("Bathurst"). */
+async function featureNearbyStreetsMatchToken(feature: PhotonFeature, token: string, signal?: AbortSignal): Promise<boolean> {
+  const [lon, lat] = feature.geometry.coordinates;
+  const nearby = await fetchNearbyStreets(lat, lon, signal);
+  const needle = token.toLowerCase();
+  return nearby.some((street) => street.properties.name?.toLowerCase().includes(needle));
+}
+
+// Bounds how many anchor candidates Step C's spatial fallback below fires a
+// reverse-geocode request for — Photon's own anchor-search ranking is
+// already nearest-first, so the true match is almost always within this
+// many candidates, and this keeps a worst-case empty search from firing a
+// couple dozen extra requests.
+const SPATIAL_RANKING_CANDIDATE_LIMIT = 6;
+
 /** Toronto-biased address/landmark search, debounced by the caller (see
  * StationAutocompleteField.tsx) — Photon has no built-in debounce of its own.
  * Strictly bounded to Toronto's own city limits (never the wider GTA —
  * Mississauga, Markham, etc. aren't TTC destinations) and filtered to
  * Canadian results client-side, so a same-named US location (Buffalo, NY
- * for a "Main St" query, say) never shows up as a commute endpoint. */
+ * for a "Main St" query, say) never shows up as a commute endpoint.
+ *
+ * A three-stage fallback pipeline, each stage only tried when the previous
+ * one came back empty — most queries resolve on Step A and never pay for
+ * the later stages:
+ *   A. The query exactly as typed.
+ *   B. A plain spelling-correction retry (see applySpellingCorrections) —
+ *      e.g. "Athletic Center" finds nothing, "Athletic Centre" does.
+ *   C. A token-split retry for a multi-word query that's still empty — often
+ *      a POI name plus a disambiguating street/area ("fresco bathurst")
+ *      that Photon can't match as one phrase even though each word alone
+ *      would. Searches just the first word, then ranks whatever comes back
+ *      by whether the rest of the query shows up in that result's own
+ *      street/locality/name — and, when no candidate's own listed fields
+ *      match at all, falls back to a spatial check (see
+ *      featureNearbyStreetsMatchToken) for a POI tagged to a minor laneway
+ *      that's still genuinely near the named street ("bathurst") even
+ *      though its own `street` property says something else entirely.
+ *      Falls back to the unranked anchor list if nothing matches either
+ *      way, rather than discarding real candidates outright.
+ *
+ * Every returned POI result then gets one more best-effort pass
+ * (enrichPoiSubtitle) that replaces its subtitle with a recognizable
+ * cross-street label when its own listed street reads as an unreliable
+ * service laneway — same root cause Step C's spatial fallback works around,
+ * fixed up for display even on a query that matched fine at Step A. */
 export async function searchAddresses(
   query: string,
   signal?: AbortSignal
@@ -145,21 +367,52 @@ export async function searchAddresses(
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  const url = `${PHOTON_BASE_URL}?q=${encodeURIComponent(trimmed)}&lat=${TORONTO_BIAS.lat}&lon=${TORONTO_BIAS.lon}&limit=5&bbox=${TORONTO_BBOX_PARAM}`;
-  const response = await fetch(url, { signal });
-  if (!response.ok) {
-    throw new Error(`Address search failed with status ${response.status}`);
+  let features = await fetchPhotonFeatures(trimmed, 5, signal);
+
+  // Step C below splits whichever of these two query strings is "best" —
+  // the corrected one once B has actually been tried, so a typo'd anchor
+  // word ("Fresco") doesn't slip through to the token-split search
+  // unmatched-to-its-real-spelling and match some unrelated same-word
+  // result (e.g. "Fresco's Fish & Chips") instead of the intended one.
+  let bestQuery = trimmed;
+
+  if (features.length === 0) {
+    const corrected = applySpellingCorrections(trimmed);
+    if (corrected !== trimmed) {
+      features = await fetchPhotonFeatures(corrected, 5, signal);
+      bestQuery = corrected;
+    }
   }
 
-  const data = (await response.json()) as PhotonResponse;
-  return (data.features ?? [])
-    .filter(
-      (feature) =>
-        feature.properties.countrycode === "CA" &&
-        isWithinToronto(feature.geometry.coordinates[1], feature.geometry.coordinates[0]) &&
-        !isExcludedMunicipality(feature.properties.city)
-    )
-    .map(toGeocodeResult);
+  if (features.length === 0) {
+    const words = bestQuery.split(/\s+/).filter(Boolean);
+    if (words.length > 1) {
+      const [anchor, ...disambiguators] = words;
+      const anchorFeatures = await fetchPhotonFeatures(anchor, 10, signal);
+      let matching = anchorFeatures.filter((feature) =>
+        disambiguators.some((word) => featureMatchesToken(feature, word))
+      );
+
+      if (matching.length === 0 && anchorFeatures.length > 0) {
+        const candidates = anchorFeatures.slice(0, SPATIAL_RANKING_CANDIDATE_LIMIT);
+        const spatialMatches = await Promise.all(
+          candidates.map(async (feature) => {
+            const matchesAny = await Promise.all(
+              disambiguators.map((word) => featureNearbyStreetsMatchToken(feature, word, signal))
+            );
+            return matchesAny.some(Boolean) ? feature : null;
+          })
+        );
+        matching = spatialMatches.filter((feature): feature is PhotonFeature => feature !== null);
+      }
+
+      features = (matching.length > 0 ? matching : anchorFeatures).slice(0, 5);
+    }
+  }
+
+  const results = features.map(toGeocodeResult);
+  await Promise.all(results.map((result, index) => enrichPoiSubtitle(result, features[index], signal)));
+  return results;
 }
 
 /** Best-effort human label for a map-dropped pin's raw coordinates — falls

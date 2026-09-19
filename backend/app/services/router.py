@@ -122,6 +122,22 @@ _DESTINATION_NODE = "__destination__"
 _ROUTE_TYPE_TO_MODE = {0: "streetcar", 1: "subway", 3: "bus"}
 _SUBWAY_ROUTE_SHORT_NAMES = {"1", "2", "4"}
 
+# A streetcar route (e.g. 506 Carlton, always numbered in TTC's 500-599
+# streetcar block) sometimes runs a construction-detour trip on buses
+# instead of streetcars — TTC's feed never gives that trip its own route_id
+# or route_type (the "506" route stays route_type=0/tram for the whole
+# route), only a distinct trip_headsign, e.g. "West - 506B Carlton
+# Replacement Bus towards Spadina Station" vs. the ordinary "West - 506
+# Carlton towards High Park". Detected/overridden per-trip in
+# _build_itinerary (see _trip_headsign) so that specific leg renders with
+# the bus mode/icon instead of a streetcar one it isn't actually running as.
+_REPLACEMENT_BUS_HEADSIGN_PATTERN = re.compile(r"replacement bus|bus detour", re.IGNORECASE)
+# Pulls the branch code (e.g. "506B") out of a matched headsign, for display
+# in place of the route's bare "506" short name — falls back to leaving the
+# short name as-is if a headsign matches _REPLACEMENT_BUS_HEADSIGN_PATTERN
+# but doesn't happen to carry a lettered branch code.
+_BRANCH_CODE_PATTERN = re.compile(r"\b(\d{3}[A-Z])\b")
+
 # Synthetic Dijkstra path-cost penalty — search weight only, see _run_dijkstra's
 # `relax` — charged whenever a transit edge is not a genuine continuation of
 # the current ride (see CONTINUOUS_RIDE_COST_MULTIPLIER below): boarding a
@@ -156,6 +172,29 @@ SUBWAY_EXIT_TO_LOCAL_BUS_PENALTY_SECONDS = 480.0
 # stop some other way — staying put should never look worse than leaving and
 # coming back.
 CONTINUOUS_RIDE_COST_MULTIPLIER = 0.95
+
+# Search-cost-only multiplier (see _run_dijkstra's `relax`) applied to every
+# walking edge's weight — nudges Dijkstra toward riding transit a little
+# further in exchange for a shorter final walk, rather than alighting as
+# soon as it's physically reachable. Never applied to `dist` or an edge's
+# real depart_sec/arrive_sec/distance_meters, so the walk time actually
+# shown to the rider always stays the raw distance/WALK_SPEED_METERS_PER_MINUTE
+# figure — this only shifts which path the search prefers.
+WALK_EDGE_COST_MULTIPLIER = 1.3
+
+# Extra flat search-cost penalty (see _run_dijkstra's `relax`) on a
+# "stop -> destination" final-mile walk edge from any stop OTHER than the
+# one with the genuinely shortest physical walk to the destination among
+# all destination-adjacent stops (see `destination_walk`/
+# closest_destination_stop_id) — so alighting a transit line one stop early
+# to shave the walk, or vice versa, only wins the search when it's a real
+# improvement: it must beat the closest-walk stop by more than this many
+# seconds of *actual* elapsed time, not just a technicality.
+# WALK_EDGE_COST_MULTIPLIER alone can't guarantee this — a small walk-time
+# delta only earns a proportionally small weighted penalty from a pure
+# multiplier, which lets a marginal, one-stop-early alighting win even with
+# that multiplier already active.
+MIN_WALK_TIME_SAVINGS_SECONDS = 180.0
 
 # Search-cost-only multipliers (see _run_dijkstra's `relax`/`route_cost_multiplier`)
 # that bias Dijkstra toward rapid-transit trunk routes and express bus
@@ -471,6 +510,11 @@ def _route_meta(conn: sqlite3.Connection, route_id: str) -> Optional[tuple[str, 
     return tuple(row) if row else None
 
 
+def _trip_headsign(conn: sqlite3.Connection, trip_id: str) -> Optional[str]:
+    row = conn.execute("SELECT trip_headsign FROM trips WHERE trip_id = ?", (trip_id,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
 def _stop_info(conn: sqlite3.Connection, stop_id: str) -> tuple[str, float, float]:
     return conn.execute("SELECT name, lat, lon FROM stops WHERE stop_id = ?", (stop_id,)).fetchone()
 
@@ -648,9 +692,17 @@ def _run_dijkstra(
     LOCAL_BUS_COST_MULTIPLIER/EXPRESS_BUS_COST_MULTIPLIER, which discount or
     inflate `priority` by mode/route so the search prefers a Line 1/2 +
     express-bus itinerary over an equivalent-looking long ride on a local
-    bus; and CONTINUOUS_RIDE_COST_MULTIPLIER, a small discount for an edge
-    that *is* a genuine continuation, so staying aboard never looks worse
-    than leaving and coming back. None of these ever touch `dist` or an
+    bus; CONTINUOUS_RIDE_COST_MULTIPLIER, a small discount for an edge that
+    *is* a genuine continuation, so staying aboard never looks worse than
+    leaving and coming back; WALK_EDGE_COST_MULTIPLIER, which inflates the
+    weight of every walking edge so the search leans toward riding transit a
+    little further over walking a little further; and
+    MIN_WALK_TIME_SAVINGS_SECONDS, an extra flat penalty on a final-mile
+    "stop -> destination" walk edge from anywhere other than the single
+    closest-walk stop to the destination (`closest_destination_stop_id`),
+    so alighting one stop early (or late) only wins the search when it's a
+    genuine `MIN_WALK_TIME_SAVINGS_SECONDS`-or-better real-time improvement,
+    not a marginal technicality. None of these ever touch `dist` or an
     edge's real depart_sec/arrive_sec."""
     active_service_ids = _active_service_ids(conn, on_date)
 
@@ -661,6 +713,11 @@ def _run_dijkstra(
     destination_walk: dict[str, tuple[float, float]] = {
         stop_id: (_walk_minutes(distance) * 60, distance) for stop_id, _n, _la, _lo, distance in destination_stops
     }
+    # _nearby_stops returns its results nearest-first, so this is simply the
+    # single stop with the shortest physical walk to the destination among
+    # every stop within range of it — the reference MIN_WALK_TIME_SAVINGS_SECONDS
+    # below measures every other final-mile walk candidate against.
+    closest_destination_stop_id: Optional[str] = destination_stops[0][0] if destination_stops else None
 
     dist: dict[str, float] = {_ORIGIN_NODE: departure_sec}
     priority: dict[str, float] = {_ORIGIN_NODE: departure_sec}
@@ -718,6 +775,15 @@ def _run_dijkstra(
 
     def relax(from_node: str, to_node: str, real_arrival: float, edge: _Edge, via: str) -> None:
         cost = real_arrival - dist[from_node]
+        if edge.kind == "walk":
+            cost *= WALK_EDGE_COST_MULTIPLIER
+            if (
+                to_node == _DESTINATION_NODE
+                and from_node != _ORIGIN_NODE
+                and closest_destination_stop_id is not None
+                and from_node != closest_destination_stop_id
+            ):
+                cost += MIN_WALK_TIME_SAVINGS_SECONDS
         if edge.kind == "transit" and edge.route_id:
             prior_route = last_route.get(from_node)
             continuing_ride = (
@@ -949,6 +1015,14 @@ def _build_itinerary(
         meta = route_meta_cache[edge.route_id]
         short_name, long_name, route_type = meta if meta else (edge.route_id, None, 3)
         mode = _ROUTE_TYPE_TO_MODE.get(route_type, "bus")
+
+        if mode == "streetcar":
+            headsign = _trip_headsign(conn, edge.trip_id)
+            if headsign and _REPLACEMENT_BUS_HEADSIGN_PATTERN.search(headsign):
+                mode = "bus"
+                branch_match = _BRANCH_CODE_PATTERN.search(headsign)
+                if branch_match:
+                    short_name = branch_match.group(1)
 
         path = _transit_leg_path(
             conn, edge.trip_id, edge.from_stop_sequence, edge.to_stop_sequence, from_lon, from_lat, to_lon, to_lat

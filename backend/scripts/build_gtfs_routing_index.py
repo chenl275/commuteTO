@@ -77,7 +77,10 @@ def build() -> None:
         "route_id TEXT PRIMARY KEY, short_name TEXT, long_name TEXT, "
         "route_type INTEGER, color TEXT)"
     )
-    cur.execute("CREATE TABLE trips (trip_id TEXT PRIMARY KEY, route_id TEXT, service_id TEXT, shape_id TEXT)")
+    cur.execute(
+        "CREATE TABLE trips (trip_id TEXT PRIMARY KEY, route_id TEXT, service_id TEXT, shape_id TEXT, "
+        "trip_headsign TEXT)"
+    )
     cur.execute(
         "CREATE TABLE stops (stop_id TEXT PRIMARY KEY, name TEXT, lat REAL, lon REAL, parent_station TEXT)"
     )
@@ -115,11 +118,25 @@ def build() -> None:
     print("Loading trips.txt ...", file=sys.stderr)
     with _open("trips.txt") as f:
         trip_rows = [
-            (r["trip_id"], r["route_id"], r["service_id"], r.get("shape_id") or None)
+            (
+                r["trip_id"],
+                r["route_id"],
+                r["service_id"],
+                r.get("shape_id") or None,
+                # A streetcar route (e.g. 506 Carlton) sometimes runs a
+                # construction-detour trip on buses instead — TTC's feed
+                # never gives that trip its own route_id (route_type stays
+                # 0/tram for the whole "506" route), only a distinct
+                # trip_headsign like "506B Carlton Replacement Bus towards
+                # Spadina Station" — see router.py's _build_itinerary, which
+                # is the only consumer of this column, for how a leg's
+                # display mode/route number get corrected from it.
+                r.get("trip_headsign") or None,
+            )
             for r in csv.DictReader(f)
         ]
-    cur.executemany("INSERT INTO trips VALUES (?,?,?,?)", trip_rows)
-    trip_to_route = {trip_id: route_id for trip_id, route_id, _service_id, _shape_id in trip_rows}
+    cur.executemany("INSERT INTO trips VALUES (?,?,?,?,?)", trip_rows)
+    trip_to_route = {trip_id: route_id for trip_id, route_id, _service_id, _shape_id, _headsign in trip_rows}
     print(f"  {len(trip_rows)} trips", file=sys.stderr)
 
     print("Loading shapes.txt ...", file=sys.stderr)
