@@ -1,0 +1,11 @@
+.venv
+venv
+__pycache__
+backend/
+*.sqlite
+*.db
+*.zip
+*.txt
+node_modules
+.next
+.git

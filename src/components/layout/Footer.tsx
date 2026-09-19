@@ -13,9 +13,6 @@ export default function Footer() {
           &copy; <span suppressHydrationWarning>{new Date().getFullYear()}</span> {SITE_NAME}. Not
           affiliated with the Toronto Transit Commission (TTC).
         </p>
-        <p className="mt-1">
-          Live routing and real-time transit data are coming soon.
-        </p>
       </div>
     </footer>
   );

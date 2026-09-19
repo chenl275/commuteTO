@@ -22,7 +22,9 @@ import heapq
 import math
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
@@ -280,6 +282,15 @@ def _walk_minutes(distance_meters: float) -> float:
 def _get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
     conn.execute("PRAGMA query_only = TRUE")
+    # Read-performance tuning — safe on a read-only connection since none of
+    # these affect on-disk durability: a larger page cache and memory-mapped
+    # I/O cut down on repeated disk reads for the hot stop_times/shapes
+    # tables across a single Dijkstra search's many small queries, and
+    # routing temp b-trees/sorts through memory avoids a temp-file round
+    # trip for the ORDER BY queries this module runs.
+    conn.execute("PRAGMA cache_size = -64000")  # 64MB page cache
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA mmap_size = 268435456")  # 256MB memory-mapped I/O
     return conn
 
 
@@ -1183,6 +1194,108 @@ def _transit_route_signature(edges: list[_Edge]) -> tuple:
     return tuple((edge.trip_id, edge.from_stop_sequence, edge.to_stop_sequence) for edge in edges if edge.kind == "transit")
 
 
+# In-memory cache of _run_dijkstra's raw edge-list output, keyed on
+# everything that actually affects the *pathfinding* (see
+# _itinerary_search_cache_key) — origin_name/destination_name are
+# deliberately excluded since they only affect display labels in
+# _build_itinerary, never which edges get searched. Only the comparatively
+# expensive, purely-schedule-based graph search is ever cached; live-delay
+# data is never stored here and is always fetched fresh in find_itineraries
+# below regardless of a cache hit, so a cached result can never serve stale
+# delay/detour info. A short TTL bounds how long a cached "no route found"
+# for a since-fixed query, or a stale schedule window, can linger; the size
+# cap is a simple reset-on-overflow rather than real LRU eviction, which is
+# plenty for this module's actual traffic pattern (a modest, bursty set of
+# popular origin/destination pairs, not a long tail worth a proper LRU).
+_ITINERARY_SEARCH_CACHE: dict[tuple, tuple[float, list[list[_Edge]]]] = {}
+ITINERARY_SEARCH_CACHE_TTL_SECONDS = 30.0
+_ITINERARY_SEARCH_CACHE_MAX_ENTRIES = 512
+
+
+def _itinerary_search_cache_key(
+    origin_lat: float,
+    origin_lon: float,
+    destination_lat: float,
+    destination_lon: float,
+    departure: datetime,
+    max_alternatives: int,
+) -> tuple:
+    # Coordinates rounded to ~11m and departure rounded to the minute — the
+    # underlying GTFS timetable a Dijkstra search depends on doesn't
+    # meaningfully change at finer granularity than that, so two requests a
+    # few seconds (or a few meters, e.g. a slightly-jittered map pin) apart
+    # for the same trip share one cached search instead of each paying for
+    # the full graph search.
+    return (
+        round(origin_lat, 4),
+        round(origin_lon, 4),
+        round(destination_lat, 4),
+        round(destination_lon, 4),
+        departure.date().isoformat(),
+        departure.hour * 60 + departure.minute,
+        max_alternatives,
+    )
+
+
+def _run_itinerary_search(
+    origin_lat: float,
+    origin_lon: float,
+    destination_lat: float,
+    destination_lon: float,
+    departure_sec: float,
+    on_date: date,
+    max_alternatives: int,
+) -> list[list[_Edge]]:
+    """The actual (expensive) Dijkstra work behind find_itineraries, with
+    _build_itinerary's display-formatting split out so its result — pure
+    `_Edge` lists, nothing live-delay- or display-label-dependent — is safe
+    to cache verbatim (see _ITINERARY_SEARCH_CACHE)."""
+    conn = _get_connection()
+    try:
+        primary_edges = _run_dijkstra(conn, origin_lat, origin_lon, destination_lat, destination_lon, departure_sec, on_date)
+        if primary_edges is None:
+            return []
+
+        edge_lists = [primary_edges]
+        primary_route_ids = {edge.route_id for edge in primary_edges if edge.kind == "transit" and edge.route_id}
+        if primary_route_ids and max_alternatives > 0:
+            alternative_edges = _run_dijkstra(
+                conn,
+                origin_lat,
+                origin_lon,
+                destination_lat,
+                destination_lon,
+                departure_sec,
+                on_date,
+                penalized_route_ids=primary_route_ids,
+                penalty_multiplier=ALTERNATIVE_ROUTE_PENALTY_MULTIPLIER,
+            )
+            if alternative_edges is not None and _transit_route_signature(alternative_edges) != _transit_route_signature(
+                primary_edges
+            ):
+                edge_lists.append(alternative_edges)
+        return edge_lists
+    finally:
+        conn.close()
+
+
+def _build_itineraries_from_edge_lists(
+    edge_lists: list[list[_Edge]],
+    origin_coords: Tuple[float, float],
+    destination_coords: Tuple[float, float],
+    origin_name: str,
+    destination_name: str,
+) -> list[Itinerary]:
+    conn = _get_connection()
+    try:
+        return [
+            _build_itinerary(conn, edges, origin_coords, destination_coords, origin_name, destination_name)
+            for edges in edge_lists
+        ]
+    finally:
+        conn.close()
+
+
 async def find_itineraries(
     origin: Tuple[float, float],
     destination: Tuple[float, float],
@@ -1208,49 +1321,40 @@ async def find_itineraries(
     destination_lat, destination_lon = destination
     departure_sec = departure.hour * 3600 + departure.minute * 60 + departure.second
 
-    def _search() -> list[Itinerary]:
-        conn = _get_connection()
-        try:
-            primary_edges = _run_dijkstra(
-                conn, origin_lat, origin_lon, destination_lat, destination_lon, departure_sec, departure.date()
-            )
-            if primary_edges is None:
-                return []
+    cache_key = _itinerary_search_cache_key(
+        origin_lat, origin_lon, destination_lat, destination_lon, departure, max_alternatives
+    )
+    now = time.monotonic()
+    cached = _ITINERARY_SEARCH_CACHE.get(cache_key)
+    if cached is not None and now - cached[0] > ITINERARY_SEARCH_CACHE_TTL_SECONDS:
+        del _ITINERARY_SEARCH_CACHE[cache_key]
+        cached = None
 
-            edge_lists = [primary_edges]
-            primary_route_ids = {edge.route_id for edge in primary_edges if edge.kind == "transit" and edge.route_id}
-            if primary_route_ids and max_alternatives > 0:
-                alternative_edges = _run_dijkstra(
-                    conn,
-                    origin_lat,
-                    origin_lon,
-                    destination_lat,
-                    destination_lon,
-                    departure_sec,
-                    departure.date(),
-                    penalized_route_ids=primary_route_ids,
-                    penalty_multiplier=ALTERNATIVE_ROUTE_PENALTY_MULTIPLIER,
-                )
-                if alternative_edges is not None and _transit_route_signature(
-                    alternative_edges
-                ) != _transit_route_signature(primary_edges):
-                    edge_lists.append(alternative_edges)
+    if cached is not None:
+        edge_lists = cached[1]
+    else:
+        edge_lists = await asyncio.to_thread(
+            _run_itinerary_search,
+            origin_lat,
+            origin_lon,
+            destination_lat,
+            destination_lon,
+            departure_sec,
+            departure.date(),
+            max_alternatives,
+        )
+        if len(_ITINERARY_SEARCH_CACHE) >= _ITINERARY_SEARCH_CACHE_MAX_ENTRIES:
+            _ITINERARY_SEARCH_CACHE.clear()
+        _ITINERARY_SEARCH_CACHE[cache_key] = (now, edge_lists)
 
-            return [
-                _build_itinerary(
-                    conn,
-                    edges,
-                    (origin_lon, origin_lat),
-                    (destination_lon, destination_lat),
-                    origin_name,
-                    destination_name,
-                )
-                for edges in edge_lists
-            ]
-        finally:
-            conn.close()
-
-    itineraries = await asyncio.to_thread(_search)
+    itineraries = await asyncio.to_thread(
+        _build_itineraries_from_edge_lists,
+        edge_lists,
+        (origin_lon, origin_lat),
+        (destination_lon, destination_lat),
+        origin_name,
+        destination_name,
+    )
 
     for itinerary in itineraries:
         (
@@ -1290,6 +1394,12 @@ def _stop_ids_for_station_on_route(conn: sqlite3.Connection, route_id: str, stat
     return [stop_id for stop_id in all_stop_ids if gtfs_service.get_station_id_for_stop(stop_id) == station_id]
 
 
+# Safe to cache verbatim (exact-args, no TTL needed): this is a pure
+# function of the static GTFS schedule baked into gtfs_routing.db at build
+# time — no live delay/detour data ever factors in — so its result for a
+# given (line, stations, departure_sec, date) tuple can only actually change
+# when that file itself is rebuilt, i.e. never during a running process.
+@lru_cache(maxsize=4096)
 def get_subway_scheduled_duration_seconds(
     line: int, origin_station_id: str, destination_station_id: str, departure_sec: float, on_date: date
 ) -> Optional[float]:
