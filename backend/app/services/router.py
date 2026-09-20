@@ -60,14 +60,6 @@ SEARCH_HORIZON_MINUTES = 120
 # hopeless search.
 MAX_SETTLED_STOPS = 20000
 MAX_TRIP_FANOUT_STOPS = 120
-# Bounds worst-case search breadth on a dense, hub-heavy network: a real TTC
-# trip essentially never benefits from a 5th route change (the itineraries
-# this router already favors — e.g. bus+subway+bus — top out at 2-3), so
-# refusing to relax a transit edge past this many genuine transfers (the
-# rider's first boarding doesn't count, only each subsequent route/trip
-# change — see `relax`) prunes a large class of runaway zig-zag exploration
-# for free, well before it'd ever compete with a sane answer anyway.
-MAX_TRANSFER_COUNT = 4
 # Universal floor on the boarding buffer for any transfer — i.e. any board
 # attempt after the rider's very first one of the trip, whether it's a
 # same-stop reboard or a walked connection to a nearby stop (see the
@@ -295,17 +287,10 @@ def _get_connection() -> sqlite3.Connection:
     # I/O cut down on repeated disk reads for the hot stop_times/shapes
     # tables across a single Dijkstra search's many small queries, and
     # routing temp b-trees/sorts through memory avoids a temp-file round
-    # trip for the ORDER BY queries this module runs. synchronous/journal_mode
-    # only actually govern write-durability trade-offs — harmless to set here
-    # (this connection is query_only and never writes) but also with no real
-    # upside, since there's no write path for them to speed up; included for
-    # completeness/explicitness rather than because they do anything on their
-    # own for this read-only workload.
-    conn.execute("PRAGMA synchronous = OFF")
-    conn.execute("PRAGMA journal_mode = OFF")
+    # trip for the ORDER BY queries this module runs.
     conn.execute("PRAGMA cache_size = -64000")  # 64MB page cache
     conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA mmap_size = 300000000")  # ~286MB memory-mapped I/O
+    conn.execute("PRAGMA mmap_size = 268435456")  # 256MB memory-mapped I/O
     return conn
 
 
@@ -732,15 +717,6 @@ def _run_dijkstra(
     edge's real depart_sec/arrive_sec."""
     active_service_ids = _active_service_ids(conn, on_date)
 
-    # Every stop's coordinates, prefetched once instead of the one-row-at-a-
-    # time `SELECT lat, lon FROM stops WHERE stop_id = ?` the transfer-walk
-    # step below used to run per settled node — ~9.4k rows is small enough
-    # that one bulk fetch up front is far cheaper overall than paying a
-    # round trip per node on a search that can settle thousands of them.
-    stop_coordinates: dict[str, tuple[float, float]] = {
-        stop_id: (lat, lon) for stop_id, lat, lon in conn.execute("SELECT stop_id, lat, lon FROM stops")
-    }
-
     origin_stops = _nearby_stops(conn, origin_lat, origin_lon, MAX_INITIAL_WALK_METERS)[:MAX_NEARBY_STOP_CANDIDATES]
     destination_stops = _nearby_stops(conn, destination_lat, destination_lon, MAX_INITIAL_WALK_METERS)[
         :MAX_NEARBY_STOP_CANDIDATES
@@ -769,11 +745,6 @@ def _run_dijkstra(
     last_route: dict[str, Optional[str]] = {_ORIGIN_NODE: None}
     last_trip: dict[str, Optional[str]] = {_ORIGIN_NODE: None}
     last_mode: dict[str, Optional[str]] = {_ORIGIN_NODE: None}
-    # Genuine route/trip transfers used to reach each node so far (the first
-    # boarding doesn't count — see MAX_TRANSFER_COUNT); `relax` refuses to
-    # extend a path past the cap rather than let a many-transfer zig-zag
-    # keep expanding.
-    transfer_count: dict[str, int] = {_ORIGIN_NODE: 0}
     settled: set[str] = set()
     heap: list[tuple[float, str]] = [(departure_sec, _ORIGIN_NODE)]
 
@@ -815,7 +786,6 @@ def _run_dijkstra(
 
     def relax(from_node: str, to_node: str, real_arrival: float, edge: _Edge, via: str) -> None:
         cost = real_arrival - dist[from_node]
-        is_transfer = False
         if edge.kind == "walk":
             cost *= WALK_EDGE_COST_MULTIPLIER
             if (
@@ -832,10 +802,7 @@ def _run_dijkstra(
                 and prior_route == edge.route_id
                 and last_trip.get(from_node) == edge.trip_id
             )
-            is_transfer = prior_route is not None and not continuing_ride
-            if is_transfer and transfer_count.get(from_node, 0) + 1 > MAX_TRANSFER_COUNT:
-                return
-            if is_transfer:
+            if prior_route is not None and not continuing_ride:
                 cost += TRANSFER_INCONVENIENCE_PENALTY_SECONDS
                 if (
                     is_rapid_transit_trunk(prior_route)
@@ -865,12 +832,10 @@ def _run_dijkstra(
                 last_route[to_node] = edge.route_id
                 last_trip[to_node] = edge.trip_id
                 last_mode[to_node] = route_mode(edge.route_id)
-                transfer_count[to_node] = transfer_count.get(from_node, 0) + 1 if is_transfer else transfer_count.get(from_node, 0)
             else:
                 last_route[to_node] = last_route.get(from_node)
                 last_trip[to_node] = last_trip.get(from_node)
                 last_mode[to_node] = last_mode.get(from_node)
-                transfer_count[to_node] = transfer_count.get(from_node, 0)
             heapq.heappush(heap, (candidate_priority, to_node))
 
     # Direct walk, bypassing transit entirely, for a short origin-destination hop.
@@ -984,9 +949,9 @@ def _run_dijkstra(
                 edge = _Edge("walk", node, to_stop_id, arrival_sec, arrive, distance_meters=0.0)
                 relax(node, to_stop_id, arrive, edge, "walk")
 
-            node_coordinates = stop_coordinates.get(node)
-            if node_coordinates:
-                node_lat, node_lon = node_coordinates
+            row = conn.execute("SELECT lat, lon FROM stops WHERE stop_id = ?", (node,)).fetchone()
+            if row:
+                node_lat, node_lon = row
                 for to_stop_id, _n, _la, _lo, distance in _nearby_stops(
                     conn, node_lat, node_lon, MAX_TRANSFER_WALK_METERS, exclude_stop_id=node
                 )[:MAX_TRANSFER_CANDIDATES]:
