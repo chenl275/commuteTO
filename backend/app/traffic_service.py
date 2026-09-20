@@ -3,6 +3,7 @@
 import re
 from datetime import datetime, time as dt_time, timedelta
 from typing import Callable, Optional, Tuple, TypeVar, Union
+from zoneinfo import ZoneInfo
 
 from .schemas import (
     ActiveSlowZone,
@@ -23,6 +24,16 @@ from .services.alerts_service import (
 )
 from .services.detour_service import get_detours_for_routes
 from .services.slow_zones_scraper import get_slow_zones
+
+# Real Toronto wall-clock time, independent of whatever timezone the host
+# OS itself runs (Render's containers default to UTC) — see
+# _parse_departure_time, the only place "now" matters here. A bare
+# datetime.now()/utcnow() on a UTC host reads as ~4-5 hours ahead of actual
+# Toronto time, which for a "Leave now" request made late Saturday evening
+# can land after 1am Sunday UTC — a time TTC subway service genuinely isn't
+# running — so router.find_itineraries correctly finds nothing and the
+# request 422s, even though it's really still Saturday evening in Toronto.
+TORONTO_TZ = ZoneInfo("America/Toronto")
 
 MINUTES_PER_STATION_HOP = 1.5
 
@@ -107,12 +118,21 @@ def _is_coordinates(value: Union[str, Tuple[float, float]]) -> bool:
 
 
 def _parse_departure_time(departure_time: str | None) -> datetime:
+    """Naive datetime in Toronto wall-clock terms — matching
+    datetime.fromisoformat's own naive result for the normal "leave later"
+    case (the frontend sends a plain, offset-free local string, e.g.
+    "2026-09-21T14:30"), so a "leave now" default and a rider-picked time
+    are always comparable/interchangeable downstream instead of one
+    silently carrying tzinfo the other doesn't. Every caller (this module,
+    router.py) already treats the result as Toronto wall-clock only — never
+    against the live system clock again — so stripping tzinfo here, once,
+    is safe and keeps that contract intact."""
     if not departure_time:
-        return datetime.now()
+        return datetime.now(TORONTO_TZ).replace(tzinfo=None)
     try:
         return datetime.fromisoformat(departure_time)
     except ValueError:
-        return datetime.now()
+        return datetime.now(TORONTO_TZ).replace(tzinfo=None)
 
 
 async def _resolve_endpoint(

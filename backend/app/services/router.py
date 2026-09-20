@@ -50,7 +50,16 @@ WALK_SPEED_METERS_PER_MINUTE = 80.0
 # Real pedestrian paths follow the street grid, not a straight line — this
 # inflates straight-line (haversine) distance to a rough walking-distance estimate.
 WALK_GRID_FACTOR = 1.25
-MAX_INITIAL_WALK_METERS = 800.0
+MAX_INITIAL_WALK_METERS = 1400.0
+# A large multi-entrance terminal (Kennedy, Union) can have its geocoded/pin
+# coordinate sit farther from its nearest platform stop_id than a typical
+# street-level address does — see _nearby_stops_with_fallback, used only for
+# the origin/destination endpoint lookup below (never for a mid-search
+# transfer walk, which stays on MAX_TRANSFER_WALK_METERS unchanged): rather
+# than let that produce a flat "no route found" for a trip that's actually
+# perfectly servable, a genuinely empty MAX_INITIAL_WALK_METERS result gets
+# one retry at this wider radius before giving up.
+FALLBACK_INITIAL_WALK_METERS = 2000.0
 MAX_TRANSFER_WALK_METERS = 250.0
 MAX_NEARBY_STOP_CANDIDATES = 25
 MAX_TRANSFER_CANDIDATES = 6
@@ -413,6 +422,23 @@ def _nearby_stops(
     return results
 
 
+def _nearby_stops_with_fallback(
+    conn: sqlite3.Connection, lat: float, lon: float, radius_m: float, fallback_radius_m: float
+) -> list[tuple[str, str, float, float, float]]:
+    """Like _nearby_stops, but if nothing at all turns up within `radius_m`,
+    retries once at `fallback_radius_m` (still nearest-first) instead of
+    leaving the caller with an empty candidate list. Used only for the
+    origin/destination endpoint lookup in _run_dijkstra — a large
+    multi-entrance terminal (Kennedy, Union) can have its own geocoded/pin
+    coordinate sit farther from its nearest platform stop_id than a typical
+    street-level address does, and a flat "no stop within range" there
+    means "no route found" for a trip that's actually perfectly servable."""
+    stops = _nearby_stops(conn, lat, lon, radius_m)
+    if stops:
+        return stops
+    return _nearby_stops(conn, lat, lon, fallback_radius_m)
+
+
 def _active_service_ids(conn: sqlite3.Connection, on_date: date) -> set[str]:
     """Service ids running on `on_date`, from calendar.txt's weekly pattern
     plus calendar_dates.txt's day-specific add/remove exceptions.
@@ -734,10 +760,12 @@ def _run_dijkstra(
     edge's real depart_sec/arrive_sec."""
     active_service_ids = _active_service_ids(conn, on_date)
 
-    origin_stops = _nearby_stops(conn, origin_lat, origin_lon, MAX_INITIAL_WALK_METERS)[:MAX_NEARBY_STOP_CANDIDATES]
-    destination_stops = _nearby_stops(conn, destination_lat, destination_lon, MAX_INITIAL_WALK_METERS)[
-        :MAX_NEARBY_STOP_CANDIDATES
-    ]
+    origin_stops = _nearby_stops_with_fallback(
+        conn, origin_lat, origin_lon, MAX_INITIAL_WALK_METERS, FALLBACK_INITIAL_WALK_METERS
+    )[:MAX_NEARBY_STOP_CANDIDATES]
+    destination_stops = _nearby_stops_with_fallback(
+        conn, destination_lat, destination_lon, MAX_INITIAL_WALK_METERS, FALLBACK_INITIAL_WALK_METERS
+    )[:MAX_NEARBY_STOP_CANDIDATES]
     destination_walk: dict[str, tuple[float, float]] = {
         stop_id: (_walk_minutes(distance) * 60, distance) for stop_id, _n, _la, _lo, distance in destination_stops
     }
