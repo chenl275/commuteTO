@@ -28,6 +28,7 @@ from functools import lru_cache
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from . import gtfs_service, stations
 from .detour_service import get_detours_for_routes
@@ -35,6 +36,15 @@ from .slow_zones_scraper import get_slow_zones
 from . import surface_realtime_service
 
 _DB_PATH = Path(__file__).resolve().parents[1] / "data" / "gtfs_routing.db"
+# Real transit-service wall-clock time, independent of whatever timezone the
+# host OS itself is running (e.g. Render's containers default to UTC) — see
+# _augment_with_live_delays, the only place "now" actually matters here
+# (comparing a live GTFS-RT feed's real-world timestamps against this
+# itinerary's own scheduled times). Every other date/time this module
+# touches (departure_sec, on_date) already arrives as plain Toronto
+# wall-clock values from the caller and is never compared against the live
+# system clock, so this constant is deliberately scoped to that one use.
+TORONTO_TZ = ZoneInfo("America/Toronto")
 
 WALK_SPEED_METERS_PER_MINUTE = 80.0
 # Real pedestrian paths follow the street grid, not a straight line — this
@@ -287,10 +297,17 @@ def _get_connection() -> sqlite3.Connection:
     # I/O cut down on repeated disk reads for the hot stop_times/shapes
     # tables across a single Dijkstra search's many small queries, and
     # routing temp b-trees/sorts through memory avoids a temp-file round
-    # trip for the ORDER BY queries this module runs.
-    conn.execute("PRAGMA cache_size = -64000")  # 64MB page cache
+    # trip for the ORDER BY queries this module runs. synchronous/
+    # journal_mode only actually govern write-durability trade-offs —
+    # harmless to set here (this connection is query_only and never writes)
+    # but with no real upside either, since there's no write path for them
+    # to speed up; included for explicitness/parity with what a write
+    # connection to this same file would want.
+    conn.execute("PRAGMA synchronous = OFF")
+    conn.execute("PRAGMA journal_mode = OFF")
     conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA mmap_size = 268435456")  # 256MB memory-mapped I/O
+    conn.execute("PRAGMA cache_size = -64000")  # 64MB page cache
+    conn.execute("PRAGMA mmap_size = 300000000")  # ~286MB memory-mapped I/O
     return conn
 
 
@@ -1085,7 +1102,20 @@ async def _augment_with_live_delays(itinerary: Itinerary, on_date: date) -> Tupl
     if not itinerary.legs:
         return 0.0, 0.0, 0.0
 
-    midnight = datetime(on_date.year, on_date.month, on_date.day)
+    # Toronto-aware, not naive: this used to be a bare `datetime(...)`
+    # (implicitly midnight in whatever timezone the *server's OS clock*
+    # happens to be set to) compared below against a bare `datetime.now()`
+    # in that same assumed-local zone. Render's system clock runs UTC, so on
+    # a host like that this was silently comparing a Toronto wall-clock
+    # value against a UTC one ~4-5 hours apart — the live-ETA-horizon check
+    # right below would almost always fail (a genuinely-soon departure looks
+    # hours away or already in the past), and .timestamp() on the old naive
+    # `midnight` (which Python treats as local-system-time, again UTC on
+    # Render) fed get_live_departure a scheduled_epoch shifted by that same
+    # offset, so it could never match a real GTFS-RT prediction either.
+    # Attaching real tzinfo here fixes both call sites below at once and
+    # works regardless of the host's own system timezone.
+    midnight = datetime(on_date.year, on_date.month, on_date.day, tzinfo=TORONTO_TZ)
     cumulative_shift = 0.0
     total_added = 0.0
     streetcar_worst = 0.0
@@ -1118,7 +1148,9 @@ async def _augment_with_live_delays(itinerary: Itinerary, on_date: date) -> Tupl
         elif leg.mode in ("streetcar", "bus") and leg.route_short_name:
             live_departure = None
             if leg.from_stop_id:
-                minutes_until_departure = (midnight + timedelta(seconds=leg.departure_sec) - datetime.now()).total_seconds() / 60.0
+                minutes_until_departure = (
+                    midnight + timedelta(seconds=leg.departure_sec) - datetime.now(TORONTO_TZ)
+                ).total_seconds() / 60.0
                 # Only within the live-ETA horizon (a later leg of a long
                 # trip, or a rider-planned future departure, keeps the
                 # static schedule instead — see LIVE_ETA_HORIZON_MINUTES).
@@ -1209,7 +1241,7 @@ def _transit_route_signature(edges: list[_Edge]) -> tuple:
 # popular origin/destination pairs, not a long tail worth a proper LRU).
 _ITINERARY_SEARCH_CACHE: dict[tuple, tuple[float, list[list[_Edge]]]] = {}
 ITINERARY_SEARCH_CACHE_TTL_SECONDS = 30.0
-_ITINERARY_SEARCH_CACHE_MAX_ENTRIES = 512
+_ITINERARY_SEARCH_CACHE_MAX_ENTRIES = 256
 
 
 def _itinerary_search_cache_key(
