@@ -39,9 +39,10 @@ import csv
 import io
 import json
 import math
+import re
 import sys
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -124,20 +125,59 @@ def _load_trips_for_routes(zf: zipfile.ZipFile, route_ids: set[str]) -> dict[str
     return trips
 
 
-# A shape must back at least this share of a (route_id, direction_id)'s
-# trips to even be considered "canonical" — filters out a genuine one-off
-# (a garage pull-in/out, a single reroute), not a real, regularly-scheduled
-# pattern. See _pick_canonical_shapes below for why the *longest* shape
-# clearing this bar is picked, rather than simply the most-used one.
+# A shape must back at least this share of its (route_id, direction_id,
+# branch_code) group's trips to even be considered "canonical" — filters out
+# a genuine one-off (a garage pull-in/out, a single reroute), not a real,
+# regularly-scheduled pattern. See _pick_canonical_shapes below for why the
+# *longest* shape clearing this bar is picked, rather than simply the
+# most-used one.
 CANONICAL_SHAPE_MIN_TRIP_SHARE = 0.10
+
+# TTC's headsign convention adds a letter immediately after the route number
+# only for a genuinely distinct, separately-branded branch — a King
+# 504A/504B east-end split, a St Clair 512B construction reroute — not for
+# the route's own everyday "Short Turn" (which stays unlettered, e.g. "506
+# Carlton Short Turn", and so still competes against the full pattern under
+# _pick_canonical_shapes' existing longest-shape-wins rule below rather than
+# getting its own separately-rendered line). See _trip_branch_code.
+_BRANCH_LETTER_PATTERN = r"\b{route}([A-Z])\b"
+
+
+def _trip_branch_code(route_short_name: str, headsign: str) -> Optional[str]:
+    """The lettered branch identifier embedded in `headsign` for a trip on
+    `route_short_name` — e.g. "504A" for "West - 504A King towards Dundas
+    West Station" — or None for the route's own plain, unlettered
+    pattern(s)."""
+    match = re.search(_BRANCH_LETTER_PATTERN.format(route=re.escape(route_short_name)), headsign)
+    return f"{route_short_name}{match.group(1)}" if match else None
+
+
+_HEADSIGN_DIRECTION_PREFIX_PATTERN = re.compile(r"^(East|West|North|South)\s*-\s*", re.IGNORECASE)
+
+
+def _clean_headsign(headsign: str) -> str:
+    """Strips the "East - "/"West - " direction prefix TTC's raw headsign
+    carries — already redundant with a feature's own `direction` property —
+    e.g. "East - 504A King towards Distillery" becomes "504A King towards
+    Distillery"."""
+    return _HEADSIGN_DIRECTION_PREFIX_PATTERN.sub("", headsign).strip()
 
 
 def _pick_canonical_shapes(
-    trips: dict[str, dict], shape_point_counts: dict[str, int]
-) -> dict[tuple[str, str], str]:
-    """(route_id, direction_id) -> the shape_id covering the full physical
-    corridor — not just whichever pattern happens to have the most
-    scheduled trips in this particular GTFS snapshot.
+    routes: dict[str, dict], trips: dict[str, dict], shape_point_counts: dict[str, int]
+) -> dict[tuple[str, str, Optional[str]], tuple[str, str]]:
+    """(route_id, direction_id, branch_code) -> (shape_id, representative
+    headsign) covering the full physical corridor for that branch — not
+    just whichever pattern happens to have the most scheduled trips in this
+    particular GTFS snapshot.
+
+    branch_code is None for a route's own plain/main pattern(s) —
+    including a same-route "Short Turn", which TTC's headsign convention
+    also leaves unlettered (see _trip_branch_code) — and
+    "{route_short_name}{letter}" for a genuinely lettered branch, each
+    judged against only *its own* trip count so a minority branch (504A
+    running fewer trips than 504B, say) isn't discarded just because
+    another branch of the same route runs more overall.
 
     TTC frequently runs a temporary short-turn (construction, a detour,
     reduced frequency on part of a route) that can outnumber the full
@@ -152,24 +192,36 @@ def _pick_canonical_shapes(
     corridor while still ignoring a rare, much-longer garage/pull-in
     variant that only a handful of trips ever use.
     """
-    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    counts: dict[tuple[str, str, Optional[str], str], int] = defaultdict(int)
+    headsign_counts: dict[tuple[str, str, Optional[str], str], Counter] = defaultdict(Counter)
     for trip in trips.values():
-        counts[(trip["route_id"], trip["direction_id"], trip["shape_id"])] += 1
+        route_id = trip["route_id"]
+        route_short_name = routes[route_id]["route_short_name"]
+        branch_code = _trip_branch_code(route_short_name, trip["trip_headsign"])
+        key = (route_id, trip["direction_id"], branch_code, trip["shape_id"])
+        counts[key] += 1
+        headsign_counts[key][trip["trip_headsign"]] += 1
 
-    totals: dict[tuple[str, str], int] = defaultdict(int)
-    for (route_id, direction_id, _shape_id), count in counts.items():
-        totals[(route_id, direction_id)] += count
+    totals: dict[tuple[str, str, Optional[str]], int] = defaultdict(int)
+    for (route_id, direction_id, branch_code, _shape_id), count in counts.items():
+        totals[(route_id, direction_id, branch_code)] += count
 
-    best: dict[tuple[str, str], tuple[str, int]] = {}
-    for (route_id, direction_id, shape_id), count in counts.items():
-        key = (route_id, direction_id)
-        if count < totals[key] * CANONICAL_SHAPE_MIN_TRIP_SHARE:
+    best: dict[tuple[str, str, Optional[str]], tuple[str, int]] = {}
+    for (route_id, direction_id, branch_code, shape_id), count in counts.items():
+        group_key = (route_id, direction_id, branch_code)
+        if count < totals[group_key] * CANONICAL_SHAPE_MIN_TRIP_SHARE:
             continue
         length = shape_point_counts.get(shape_id, 0)
-        if key not in best or length > best[key][1]:
-            best[key] = (shape_id, length)
+        if group_key not in best or length > best[group_key][1]:
+            best[group_key] = (shape_id, length)
 
-    return {key: shape_id for key, (shape_id, _length) in best.items()}
+    result: dict[tuple[str, str, Optional[str]], tuple[str, str]] = {}
+    for group_key, (shape_id, _length) in best.items():
+        route_id, direction_id, branch_code = group_key
+        headsign_key = (route_id, direction_id, branch_code, shape_id)
+        representative_headsign = headsign_counts[headsign_key].most_common(1)[0][0]
+        result[group_key] = (shape_id, representative_headsign)
+    return result
 
 
 def _load_shape_geometries(
@@ -206,11 +258,13 @@ def _build_route_feature_collection(
     all_geometries = _load_shape_geometries(zf, all_shape_ids)
     shape_point_counts = {shape_id: len(points) for shape_id, points in all_geometries.items()}
 
-    canonical_shapes = _pick_canonical_shapes(trips, shape_point_counts)
+    canonical_shapes = _pick_canonical_shapes(routes, trips, shape_point_counts)
     geometries = all_geometries
 
     features = []
-    for (route_id, direction_id), shape_id in sorted(canonical_shapes.items()):
+    for (route_id, direction_id, branch_code), (shape_id, headsign) in sorted(
+        canonical_shapes.items(), key=lambda item: (item[0][0], item[0][1], item[0][2] or "")
+    ):
         coordinates = geometries.get(shape_id)
         if not coordinates or len(coordinates) < 2:
             continue
@@ -225,6 +279,13 @@ def _build_route_feature_collection(
                     "routeLongName": route["route_long_name"],
                     "direction": int(direction_id),
                     "colorHex": f"#{route['route_color'] or default_color}",
+                    # None for the route's own plain/main pattern — a rider
+                    # doesn't need "which branch" called out when there's
+                    # only one. Set only for a genuinely lettered variant
+                    # (see _trip_branch_code): a King 504A/504B split, a St
+                    # Clair 512B construction reroute.
+                    "branchCode": branch_code,
+                    "headsign": _clean_headsign(headsign),
                 },
             }
         )

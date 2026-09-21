@@ -671,12 +671,21 @@ function buildSurfaceRouteTooltipContent(properties: {
   routeShortName: string;
   routeLongName: string;
   networkLabel: string;
+  /** A genuinely lettered branch (504A/504B, a 512B replacement-bus
+   * reroute) — when set (with `headsign`), the tooltip names this specific
+   * branch instead of just the bare route number every branch shares. */
+  branchCode?: string | null;
+  headsign?: string;
 }): HTMLElement {
   const container = document.createElement("div");
   container.className = "p-1";
   const text = document.createElement("p");
   text.className = "text-xs font-semibold text-neutral-900";
-  text.textContent = `${properties.routeShortName} ${properties.routeLongName} ${properties.networkLabel}`;
+  const label =
+    properties.branchCode && properties.headsign
+      ? properties.headsign
+      : `${properties.routeShortName} ${properties.routeLongName}`;
+  text.textContent = `${label} ${properties.networkLabel}`;
   container.appendChild(text);
   return container;
 }
@@ -1424,6 +1433,8 @@ export default function TTCMap({
             routeShortName: string;
             routeLongName: string;
             direction: number;
+            branchCode: string | null;
+            headsign: string;
           };
 
           highlightSurfaceRoute(map, properties.routeId, properties.direction);
@@ -1442,6 +1453,8 @@ export default function TTCMap({
                 routeShortName: properties.routeShortName,
                 routeLongName: properties.routeLongName,
                 networkLabel,
+                branchCode: properties.branchCode,
+                headsign: properties.headsign,
               })
             )
             .addTo(map);
@@ -1465,7 +1478,12 @@ export default function TTCMap({
       map.on("mousemove", DAY_BUSES_LAYER_ID, (event) => {
         const feature = event.features?.[0];
         if (!feature || feature.geometry.type !== "LineString") return;
-        const properties = feature.properties as { routeShortName: string; routeLongName: string };
+        const properties = feature.properties as {
+          routeShortName: string;
+          routeLongName: string;
+          branchCode: string | null;
+          headsign: string;
+        };
 
         if (!surfaceRouteHoverPopup) {
           surfaceRouteHoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 6 });
@@ -1477,6 +1495,8 @@ export default function TTCMap({
               routeShortName: properties.routeShortName,
               routeLongName: properties.routeLongName,
               networkLabel: "Bus",
+              branchCode: properties.branchCode,
+              headsign: properties.headsign,
             })
           )
           .addTo(map);

@@ -15,6 +15,11 @@ export default function Hero() {
   // by default, or whichever stacked alternative card the rider picked in
   // CommuteResultCard (see onSelectRoute below).
   const [highlightedRoute, setHighlightedRoute] = useState<RouteSummary | null>(null);
+  // Owned here (not inside CommuteForm) because collapsing also has to
+  // shrink the positioning wrapper below — otherwise its now-invisible
+  // full-size box would keep intercepting clicks/drags on the map
+  // underneath it even once the visible card is just a small corner tab.
+  const [isFormCollapsed, setIsFormCollapsed] = useState(false);
 
   function handleFromChange(value: string) {
     setFrom(value);
@@ -58,7 +63,16 @@ export default function Hero() {
       />
 
       <div className="pointer-events-none absolute inset-0">
-        <div className="pointer-events-auto absolute inset-x-4 top-4 bottom-4 overflow-y-auto sm:inset-x-auto sm:bottom-auto sm:left-6 sm:top-1/2 sm:max-h-[calc(100%-3rem)] sm:w-[26rem] sm:-translate-y-1/2">
+        {/* The positioning box shrinks to fit in the collapsed state too —
+            not just the visible card inside it — so its hit-testing area
+            never blocks map clicks/drags once it's just a small corner tab. */}
+        <div
+          className={
+            isFormCollapsed
+              ? "pointer-events-auto absolute left-4 top-4 sm:left-6 sm:top-6"
+              : "pointer-events-auto absolute inset-x-4 top-4 bottom-4 overflow-y-auto sm:inset-x-auto sm:bottom-auto sm:left-6 sm:top-1/2 sm:max-h-[calc(100%-3rem)] sm:w-[26rem] sm:-translate-y-1/2"
+          }
+        >
           <CommuteForm
             from={from}
             destination={destination}
@@ -71,6 +85,8 @@ export default function Hero() {
             onSwap={handleSwap}
             onResult={setHighlightedRoute}
             onSelectRoute={setHighlightedRoute}
+            isCollapsed={isFormCollapsed}
+            onToggleCollapsed={() => setIsFormCollapsed((collapsed) => !collapsed)}
           />
         </div>
       </div>

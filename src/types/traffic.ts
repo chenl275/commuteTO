@@ -28,6 +28,17 @@ export interface SurfaceRouteProperties {
   routeLongName: string;
   direction: number;
   colorHex: string;
+  /** A genuinely distinct, separately-lettered branch (e.g. "504A", "512B"
+   * for a construction/replacement-bus reroute) — TTC's own headsign
+   * convention only adds a letter for a real parallel/alternate pattern,
+   * never for the route's everyday "Short Turn". null for the route's own
+   * plain/main pattern, where there's nothing to disambiguate. */
+  branchCode: string | null;
+  /** This branch's real rider-facing headsign, direction prefix stripped
+   * (e.g. "504A King towards Distillery") — lets a branch's tooltip/popup
+   * show specifically where *this* line goes, not just its bare route
+   * number. */
+  headsign: string;
 }
 
 export type SurfaceRoutesGeoJSON = GeoJSON.FeatureCollection<

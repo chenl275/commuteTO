@@ -8,6 +8,7 @@ import CommuteResultCard from "./CommuteResultCard";
 import Button from "@/components/ui/Button";
 import {
   CalendarIcon,
+  ChevronIcon,
   ClockIcon,
   FlagIcon,
   MapPinIcon,
@@ -89,6 +90,12 @@ interface CommuteFormProps {
   /** Fired when the rider picks a different stacked route card in the
    * result — the newly selected route to re-highlight on TTCMap. */
   onSelectRoute?: (route: RouteSummary) => void;
+  /** Controlled by the parent (Hero.tsx) rather than owned here, since
+   * collapsing also needs to shrink the floating positioning wrapper
+   * around this card — otherwise its now-invisible full-size box would
+   * keep intercepting clicks/drags on the map underneath it. */
+  isCollapsed: boolean;
+  onToggleCollapsed: () => void;
 }
 
 export default function CommuteForm({
@@ -103,6 +110,8 @@ export default function CommuteForm({
   onSwap,
   onResult,
   onSelectRoute,
+  isCollapsed,
+  onToggleCollapsed,
 }: CommuteFormProps) {
   const [departureMode, setDepartureMode] = useState<DepartureMode>("now");
   const [date, setDate] = useState(getTodayISODate);
@@ -110,6 +119,11 @@ export default function CommuteForm({
   const [isCalculating, setIsCalculating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<TransitCommuteResponse | null>(null);
+  // Collapsing never unmounts the form — every field below stays exactly
+  // where React state already keeps it (from/destination are lifted to
+  // Hero.tsx; date/time/departureMode/result live right here) — so
+  // expanding again always shows whatever was last entered, with no extra
+  // bookkeeping needed.
 
   const isLeavingLater = departureMode === "later";
   const canSubmit =
@@ -164,98 +178,131 @@ export default function CommuteForm({
   }
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="rounded-3xl border border-neutral-200 bg-white/90 p-5 text-neutral-900 shadow-xl shadow-black/5 backdrop-blur-xl sm:p-8 dark:border-neutral-800 dark:bg-neutral-900/80 dark:text-white dark:shadow-2xl dark:shadow-black/40"
+    <div
+      className={`rounded-3xl border border-neutral-200 bg-white/90 text-neutral-900 shadow-xl shadow-black/5 backdrop-blur-xl transition-[padding] duration-300 dark:border-neutral-800 dark:bg-neutral-900/80 dark:text-white dark:shadow-2xl dark:shadow-black/40 ${
+        isCollapsed ? "w-fit p-2" : "p-5 sm:p-8"
+      }`}
     >
-      <div className="flex flex-col gap-4">
-        <StationAutocompleteField
-          id="from"
-          label="From"
-          icon={<MapPinIcon className="h-5 w-5" />}
-          placeholder="Departure station, address, or landmark"
-          value={from}
-          onChange={onFromChange}
-          onSelect={onFromSelect}
-        />
-
+      <div className={`flex items-center gap-2 ${isCollapsed ? "" : "mb-4"}`}>
+        {!isCollapsed && (
+          <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-white/60">
+            Plan your commute
+          </p>
+        )}
         <button
           type="button"
-          onClick={onSwap}
-          aria-label="Swap from and destination"
-          className="mx-auto -my-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-neutral-300 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 dark:border-white/20 dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"
+          onClick={onToggleCollapsed}
+          aria-expanded={!isCollapsed}
+          aria-label={isCollapsed ? "Expand trip planner" : "Collapse trip planner"}
+          title={isCollapsed ? "Expand trip planner" : "Collapse trip planner"}
+          className="ml-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"
         >
-          <SwapIcon className="h-4 w-4 rotate-90" />
+          <ChevronIcon className={`h-4 w-4 transition-transform duration-300 ${isCollapsed ? "-rotate-90" : "rotate-0"}`} />
         </button>
-
-        <StationAutocompleteField
-          id="destination"
-          label="Destination"
-          icon={<FlagIcon className="h-5 w-5" />}
-          placeholder="Destination station, address, or landmark"
-          value={destination}
-          onChange={onDestinationChange}
-          onSelect={onDestinationSelect}
-        />
       </div>
 
-      <DepartureToggle
-        value={departureMode}
-        onChange={setDepartureMode}
-        className="mt-5"
-      />
-
-      {isLeavingLater && (
-        <div className="mt-4 flex animate-fade-in-up flex-col gap-4">
-          <FormField
-            id="departure-date"
-            label="Date"
-            type="date"
-            icon={<CalendarIcon className="h-5 w-5" />}
-            value={date}
-            min={getTodayISODate()}
-            onChange={(e) => setDate(e.target.value)}
-            required
-          />
-          <FormField
-            id="departure-time"
-            label="Time"
-            type="time"
-            icon={<ClockIcon className="h-5 w-5" />}
-            value={time}
-            onChange={(e) => setTime(e.target.value)}
-            required
-          />
-        </div>
-      )}
-
-      <Button
-        type="submit"
-        disabled={isCalculating || !canSubmit}
-        className="mt-5 w-full sm:w-auto"
+      {/* Collapsing hides the fields/results with a height/opacity
+          transition rather than unmounting them, so every entered value —
+          from/destination (lifted to Hero.tsx), date/time/departureMode,
+          the last result — is exactly as the rider left it on expand. */}
+      <div
+        className={`grid transition-[grid-template-rows,opacity,width] duration-300 ease-in-out ${
+          isCollapsed ? "w-0 grid-rows-[0fr] opacity-0" : "w-full grid-rows-[1fr] opacity-100"
+        }`}
       >
-        {isCalculating ? (
-          <>
-            <SpinnerIcon className="h-4 w-4 animate-spin" />
-            Calculating…
-          </>
-        ) : (
-          "Calculate Commute"
-        )}
-      </Button>
+        <div className="overflow-hidden">
+          <form onSubmit={handleSubmit}>
+            <div className="flex flex-col gap-4">
+              <StationAutocompleteField
+                id="from"
+                label="From"
+                icon={<MapPinIcon className="h-5 w-5" />}
+                placeholder="Departure station, address, or landmark"
+                value={from}
+                onChange={onFromChange}
+                onSelect={onFromSelect}
+              />
 
-      {errorMessage && (
-        <p
-          role="status"
-          className="mt-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100"
-        >
-          {errorMessage}
-        </p>
-      )}
+              <button
+                type="button"
+                onClick={onSwap}
+                aria-label="Swap from and destination"
+                className="mx-auto -my-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-neutral-300 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900 dark:border-white/20 dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"
+              >
+                <SwapIcon className="h-4 w-4 rotate-90" />
+              </button>
 
-      {result && (
-        <CommuteResultCard result={result} className="mt-4 animate-fade-in-up" onSelectRoute={onSelectRoute} />
-      )}
-    </form>
+              <StationAutocompleteField
+                id="destination"
+                label="Destination"
+                icon={<FlagIcon className="h-5 w-5" />}
+                placeholder="Destination station, address, or landmark"
+                value={destination}
+                onChange={onDestinationChange}
+                onSelect={onDestinationSelect}
+              />
+            </div>
+
+            <DepartureToggle
+              value={departureMode}
+              onChange={setDepartureMode}
+              className="mt-5"
+            />
+
+            {isLeavingLater && (
+              <div className="mt-4 flex animate-fade-in-up flex-col gap-4">
+                <FormField
+                  id="departure-date"
+                  label="Date"
+                  type="date"
+                  icon={<CalendarIcon className="h-5 w-5" />}
+                  value={date}
+                  min={getTodayISODate()}
+                  onChange={(e) => setDate(e.target.value)}
+                  required
+                />
+                <FormField
+                  id="departure-time"
+                  label="Time"
+                  type="time"
+                  icon={<ClockIcon className="h-5 w-5" />}
+                  value={time}
+                  onChange={(e) => setTime(e.target.value)}
+                  required
+                />
+              </div>
+            )}
+
+            <Button
+              type="submit"
+              disabled={isCalculating || !canSubmit}
+              className="mt-5 w-full sm:w-auto"
+            >
+              {isCalculating ? (
+                <>
+                  <SpinnerIcon className="h-4 w-4 animate-spin" />
+                  Calculating…
+                </>
+              ) : (
+                "Calculate Commute"
+              )}
+            </Button>
+
+            {errorMessage && (
+              <p
+                role="status"
+                className="mt-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100"
+              >
+                {errorMessage}
+              </p>
+            )}
+
+            {result && (
+              <CommuteResultCard result={result} className="mt-4 animate-fade-in-up" onSelectRoute={onSelectRoute} />
+            )}
+          </form>
+        </div>
+      </div>
+    </div>
   );
 }
