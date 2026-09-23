@@ -667,27 +667,54 @@ function clearSurfaceRouteHighlight(map: maplibregl.Map) {
   map.setPaintProperty(NIGHT_BUSES_LAYER_ID, "line-opacity", NIGHT_BUS_OPACITY_EXPRESSION);
 }
 
-function buildSurfaceRouteTooltipContent(properties: {
+interface SurfaceRouteTooltipEntry {
   routeShortName: string;
   routeLongName: string;
-  networkLabel: string;
   /** A genuinely lettered branch (504A/504B, a 512B replacement-bus
-   * reroute) — when set (with `headsign`), the tooltip names this specific
+   * reroute) — when set (with `headsign`), the entry names this specific
    * branch instead of just the bare route number every branch shares. */
   branchCode?: string | null;
   headsign?: string;
-}): HTMLElement {
+}
+
+/** A shared corridor (e.g. Queens Quay East, where routes 114 and 97C both
+ * run) stacks several different routes' LineStrings on the same pixels —
+ * MapLibre's hit-test returns all of them in `event.features`, so a popup
+ * built from just the first one silently drops whichever routes happened
+ * to hit-test underneath it. Renders one line per distinct route instead,
+ * all sharing `networkLabel` since every entry here always comes from a
+ * single layer's own event (see the mousemove handlers below) — a
+ * streetcar layer's features are never mixed with a day-bus layer's. */
+function buildSurfaceRouteTooltipContent(entries: SurfaceRouteTooltipEntry[], networkLabel: string): HTMLElement {
   const container = document.createElement("div");
-  container.className = "p-1";
-  const text = document.createElement("p");
-  text.className = "text-xs font-semibold text-neutral-900";
-  const label =
-    properties.branchCode && properties.headsign
-      ? properties.headsign
-      : `${properties.routeShortName} ${properties.routeLongName}`;
-  text.textContent = `${label} ${properties.networkLabel}`;
-  container.appendChild(text);
+  container.className = "flex flex-col gap-1 p-1";
+  for (const entry of entries) {
+    const text = document.createElement("p");
+    text.className = "text-xs font-semibold text-neutral-900";
+    const label =
+      entry.branchCode && entry.headsign ? entry.headsign : `${entry.routeShortName} ${entry.routeLongName}`;
+    text.textContent = `${label} ${networkLabel}`;
+    container.appendChild(text);
+  }
   return container;
+}
+
+/** Keeps just the first feature seen per distinct `routeShortName` from a
+ * hover/click hit-test — several different routes sharing a corridor (114
+ * and 97C on Queens Quay East, say) all show up in `event.features` at
+ * once, but a single route can also appear more than once in there (its
+ * shape crossing itself, or adjacent segments both under the cursor), which
+ * would otherwise list the same route twice. */
+function dedupeSurfaceRouteFeatures<T extends { properties: { routeShortName: string } }>(features: T[]): T[] {
+  const seen = new Set<string>();
+  const deduped: T[] = [];
+  for (const feature of features) {
+    const routeShortName = feature.properties.routeShortName;
+    if (seen.has(routeShortName)) continue;
+    seen.add(routeShortName);
+    deduped.push(feature);
+  }
+  return deduped;
 }
 
 function buildSurfaceStopTooltipContent(properties: { name: string; routes: string[] | string }): HTMLElement {
@@ -1426,18 +1453,26 @@ export default function TTCMap({
           map.getCanvas().style.cursor = "pointer";
         });
         map.on("mousemove", layerId, (event) => {
-          const feature = event.features?.[0];
-          if (!feature || feature.geometry.type !== "LineString") return;
-          const properties = feature.properties as {
-            routeId: string;
-            routeShortName: string;
-            routeLongName: string;
-            direction: number;
-            branchCode: string | null;
-            headsign: string;
-          };
+          const lineFeatures = (event.features ?? [])
+            .filter((feature) => feature.geometry.type === "LineString" && !!feature.properties)
+            .map((feature) => ({
+              properties: feature.properties as {
+                routeId: string;
+                routeShortName: string;
+                routeLongName: string;
+                direction: number;
+                branchCode: string | null;
+                headsign: string;
+              },
+            }));
+          if (lineFeatures.length === 0) return;
+          const dedupedFeatures = dedupeSurfaceRouteFeatures(lineFeatures);
 
-          highlightSurfaceRoute(map, properties.routeId, properties.direction);
+          // Same-layer overlaps (e.g. two streetcar routes sharing track)
+          // still highlight/dim around whichever route is topmost under the
+          // cursor — the tooltip below is what actually lists every route.
+          const topmost = dedupedFeatures[0].properties;
+          highlightSurfaceRoute(map, topmost.routeId, topmost.direction);
 
           if (!surfaceRouteHoverPopup) {
             surfaceRouteHoverPopup = new maplibregl.Popup({
@@ -1449,13 +1484,10 @@ export default function TTCMap({
           surfaceRouteHoverPopup
             .setLngLat(event.lngLat)
             .setDOMContent(
-              buildSurfaceRouteTooltipContent({
-                routeShortName: properties.routeShortName,
-                routeLongName: properties.routeLongName,
-                networkLabel,
-                branchCode: properties.branchCode,
-                headsign: properties.headsign,
-              })
+              buildSurfaceRouteTooltipContent(
+                dedupedFeatures.map((feature) => feature.properties),
+                networkLabel
+              )
             )
             .addTo(map);
         });
@@ -1476,14 +1508,22 @@ export default function TTCMap({
         map.getCanvas().style.cursor = "pointer";
       });
       map.on("mousemove", DAY_BUSES_LAYER_ID, (event) => {
-        const feature = event.features?.[0];
-        if (!feature || feature.geometry.type !== "LineString") return;
-        const properties = feature.properties as {
-          routeShortName: string;
-          routeLongName: string;
-          branchCode: string | null;
-          headsign: string;
-        };
+        const lineFeatures = (event.features ?? [])
+          .filter((feature) => feature.geometry.type === "LineString" && !!feature.properties)
+          .map((feature) => ({
+            properties: feature.properties as {
+              routeShortName: string;
+              routeLongName: string;
+              branchCode: string | null;
+              headsign: string;
+            },
+          }));
+        if (lineFeatures.length === 0) return;
+        // The day-bus network is dense enough that two different routes
+        // sharing a block (114 Queens Quay East and 97C Yonge, say) is
+        // routine, not an edge case — every distinct route under the
+        // cursor gets its own line in the tooltip below.
+        const dedupedFeatures = dedupeSurfaceRouteFeatures(lineFeatures);
 
         if (!surfaceRouteHoverPopup) {
           surfaceRouteHoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 6 });
@@ -1491,13 +1531,10 @@ export default function TTCMap({
         surfaceRouteHoverPopup
           .setLngLat(event.lngLat)
           .setDOMContent(
-            buildSurfaceRouteTooltipContent({
-              routeShortName: properties.routeShortName,
-              routeLongName: properties.routeLongName,
-              networkLabel: "Bus",
-              branchCode: properties.branchCode,
-              headsign: properties.headsign,
-            })
+            buildSurfaceRouteTooltipContent(
+              dedupedFeatures.map((feature) => feature.properties),
+              "Bus"
+            )
           )
           .addTo(map);
       });
