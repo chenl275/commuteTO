@@ -1,4 +1,3 @@
-<img width="5120" height="2344" alt="Screenshot 2026-09-23 at 6 48 18 PM" src="https://github.com/user-attachments/assets/bda20ff9-e6d9-49b8-871c-24018e82b139" />
 # commuteTO
 
 A real-time transit tracker and multi-modal routing engine for Toronto's TTC network that predicts delays before they hit your commute. Unlike standard transit apps that merely read static timetables, commuteTO combines live vehicle telemetry and subway slow zones with realistic train physics to reveal your true travel time.
