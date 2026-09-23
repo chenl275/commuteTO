@@ -1,6 +1,6 @@
 # commuteTO
 
-A real-time transit tracker and multi-modal routing engine for Toronto's TTC network that predicts delays before they hit your commute. Unlike standard transit apps that merely read static timetables, commuteTO combines live vehicle telemetry and subway slow zones with realistic train physics to reveal your true travel time.
+A multi-modal transit routing engine for Toronto's TTC network that models delays that may impact your commute. Unlike standard transit apps that rely solely on static scheduled timetables, commuteTO integrates active subway slow zones and network service alerts with kinematic train physics to calculate realistic travel times.
 
 ---
 
@@ -16,7 +16,7 @@ A real-time transit tracker and multi-modal routing engine for Toronto's TTC net
 * **Live Web App:** [commute-to.vercel.app](https://commute-to.vercel.app)
 * **Backend:** FastAPI on Render (Free Tier)
 
-> **⚡ Cloud vs. Local Performance:**  
+> **Cloud vs. Local Performance:**  
 > The routing engine solves time-dependent, multi-modal Dijkstra graphs across the entire Toronto transit graph (subways, streetcars, surface buses, and pedestrian walk transfers) directly in Python.  
 > 
 > Because Render's free tier provisions a throttled **0.1 vCPU** with shared virtual disk I/O, computing complex multi-transfer routes across the full network can take **30–60 seconds** on the cloud deployment. **Running the project locally is recommended for faster route calculations** using native processor cores.
