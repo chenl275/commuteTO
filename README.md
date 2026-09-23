@@ -1,6 +1,6 @@
 # commuteTO
 
-A multi-modal transit routing engine for Toronto's TTC network that models delays that may impact your commute. Unlike standard transit apps that rely solely on static scheduled timetables, commuteTO integrates active subway slow zones and network service alerts with kinematic train physics to calculate realistic travel times.
+A multi-modal transit routing engine for Toronto's TTC network that accounts for operational delays. commuteTO factors in active subway slow zones, service alerts, and kinematic train physics to project realistic travel times.
 
 ---
 
