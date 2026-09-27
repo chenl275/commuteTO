@@ -84,7 +84,7 @@ export default function StationAutocompleteField({
     };
   }, [value]);
 
-  const suggestions: Suggestion[] = [
+  const rawSuggestions: Suggestion[] = [
     ...stationSuggestions.map((station) => ({
       kind: "station" as const,
       id: station.id,
@@ -102,6 +102,20 @@ export default function StationAutocompleteField({
       lon: result.lon,
     })),
   ];
+  // Photon can hand back distinct OSM nodes (different osm_type/osm_id) that
+  // nonetheless render as the exact same title/subtitle text — deduping on
+  // id (or kind+id) doesn't catch that, since the ids genuinely differ. What
+  // the rider actually perceives as "duplicate" is the rendered text, so
+  // dedupe on that alone: the title (`label`) plus subtitle (address results
+  // only — stations have none), regardless of id/kind.
+  const seenSuggestionTexts = new Set<string>();
+  const suggestions = rawSuggestions.filter((suggestion) => {
+    const subtitle = suggestion.kind === "address" ? suggestion.subtitle : "";
+    const dedupeKey = `${suggestion.label}|${subtitle}`;
+    if (seenSuggestionTexts.has(dedupeKey)) return false;
+    seenSuggestionTexts.add(dedupeKey);
+    return true;
+  });
   const showSuggestions =
     isOpen &&
     suggestions.length > 0 &&
@@ -167,8 +181,12 @@ export default function StationAutocompleteField({
           role="listbox"
           className="absolute top-full left-0 z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-neutral-300 bg-white py-1 shadow-xl dark:border-white/20 dark:bg-neutral-900"
         >
-          {suggestions.map((suggestion) => (
-            <li key={`${suggestion.kind}-${suggestion.id}`} role="option" aria-selected={suggestion.label === value}>
+          {suggestions.map((suggestion, index) => (
+            <li
+              key={`${suggestion.kind}-${suggestion.id}-${index}`}
+              role="option"
+              aria-selected={suggestion.label === value}
+            >
               <button
                 type="button"
                 onMouseDown={(event) => event.preventDefault()}

@@ -59,6 +59,8 @@ export default function Hero() {
         onSelectDeparture={handleFromSelect}
         onSetOrigin={handleFromSelect}
         onSetDestination={handleDestinationSelect}
+        origin={fromCoords}
+        destination={destinationCoords}
         commuteResult={highlightedRoute}
       />
 

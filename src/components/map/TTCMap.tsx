@@ -16,7 +16,7 @@ import { getAlerts, getDayBuses, getNightBuses, getSlowZones, getStreetcars, get
 import { reverseGeocode } from "@/lib/geocoding";
 import { formatStationLabel } from "@/lib/stationDisplay";
 import { useDetourMap } from "@/lib/detourMapContext";
-import type { LocationSelection } from "@/lib/types";
+import type { LatLon, LocationSelection } from "@/lib/types";
 import type { DetourSummary, RouteSummary } from "@/types/traffic";
 
 interface TTCMapProps {
@@ -28,6 +28,15 @@ interface TTCMapProps {
   onSetOrigin?: (selection: LocationSelection) => void;
   /** Same as `onSetOrigin`, for "Set as Destination". */
   onSetDestination?: (selection: LocationSelection) => void;
+  /** The commute form's currently selected origin/destination coordinates
+   * (a station, geocoded address, or resolved free-typed location) — dropped
+   * as a plain marker the moment it's picked, independently of
+   * `commuteResult` below (which only exists once a commute has actually
+   * been calculated, and whose own endpoint markers trace the route's real
+   * start/end, not necessarily the raw selection). Null clears the marker,
+   * e.g. once the rider edits the text and it no longer matches these coords. */
+  origin?: LatLon | null;
+  destination?: LatLon | null;
   /** The most recently calculated commute, used to glow the route + fit the map to it. */
   commuteResult?: RouteSummary | null;
 }
@@ -1070,17 +1079,46 @@ function computeRouteFeatures(result: RouteSummary | null): {
   return { route, endpoints, bounds };
 }
 
+/** Extracts a MapLibre-ready `[lng, lat]` pair from whatever shape a
+ * coordinate happens to arrive in — this app's own `{ lat, lon }` (see
+ * lib/types' LatLon), a raw maplibregl-style `{ lat, lng }`, or a
+ * `[lng, lat]`/`[lon, lat]` tuple — or null when nothing usable is there.
+ * Defensive on purpose: passing an incomplete pair straight to
+ * `Marker#setLngLat` doesn't fail loudly at the call site, it throws deep
+ * inside MapLibre's next internal position update. */
+function getLngLat(loc: unknown): [number, number] | null {
+  if (!loc) return null;
+  if (Array.isArray(loc)) {
+    return typeof loc[0] === "number" && typeof loc[1] === "number" ? [loc[0], loc[1]] : null;
+  }
+  if (typeof loc === "object") {
+    const candidate = loc as { lat?: unknown; lon?: unknown; lng?: unknown };
+    if (typeof candidate.lat !== "number") return null;
+    if (typeof candidate.lng === "number") return [candidate.lng, candidate.lat];
+    if (typeof candidate.lon === "number") return [candidate.lon, candidate.lat];
+  }
+  return null;
+}
+
 export default function TTCMap({
   className = "",
   onSelectDeparture,
   onSetOrigin,
   onSetDestination,
+  origin = null,
+  destination = null,
   commuteResult = null,
 }: TTCMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const isDark = useIsDarkMode();
   const hasSetInitialStyleRef = useRef(false);
+  // The form's currently selected origin/destination pins — separate from
+  // the click/long-press-dropped originPinMarker/destinationPinMarker inside
+  // the map-creation effect below, since these are driven by the
+  // `origin`/`destination` props instead of a direct map interaction.
+  const originMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const destinationMarkerRef = useRef<maplibregl.Marker | null>(null);
 
   // The detour a rider picked "View on Map" for in the header's DetourPanel
   // (a sibling component, see lib/detourMapContext) — drives the warning
@@ -1330,6 +1368,11 @@ export default function TTCMap({
       dragRotate: true,
       pitchWithRotate: true,
       touchPitch: true,
+      // Retina/high-DPI screens otherwise push MapLibre's internal canvas
+      // past a GPU's MAX_TEXTURE_SIZE, which logs a console warning and
+      // silently clamps the canvas anyway — cap it ourselves at a size
+      // every practical GPU supports.
+      maxCanvasSize: [4096, 4096],
     });
 
     map.addControl(
@@ -1643,9 +1686,57 @@ export default function TTCMap({
       if (longPressTimer) clearTimeout(longPressTimer);
       map.remove();
       mapRef.current = null;
+      // map.remove() tears down every marker attached to it along with the
+      // container — drop these refs too so a remount's marker-sync effects
+      // create fresh ones instead of calling setLngLat on a dead marker.
+      originMarkerRef.current = null;
+      destinationMarkerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- isDark is read once for the initial style; later changes go through the effect below
   }, [onSelectDeparture, onSetOrigin, onSetDestination]);
+
+  // Drops/updates a plain marker for the commute form's currently selected
+  // origin/destination the instant a suggestion is picked (or removes it
+  // once the rider edits the text away from those coordinates) — independent
+  // of commuteResult's own endpoint markers further down, which only exist
+  // after a commute has actually been calculated.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const lngLat = getLngLat(origin);
+    if (lngLat) {
+      if (originMarkerRef.current) {
+        originMarkerRef.current.setLngLat(lngLat);
+      } else {
+        // setLngLat before addTo, not after — addTo() triggers MapLibre's
+        // internal position update synchronously, which reads the marker's
+        // already-set _lngLat; a marker constructed with no position and
+        // added first crashes there instead of once setLngLat finally runs.
+        originMarkerRef.current = new maplibregl.Marker({ color: "#10b981" }).setLngLat(lngLat).addTo(map);
+      }
+    } else {
+      originMarkerRef.current?.remove();
+      originMarkerRef.current = null;
+    }
+  }, [origin]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const lngLat = getLngLat(destination);
+    if (lngLat) {
+      if (destinationMarkerRef.current) {
+        destinationMarkerRef.current.setLngLat(lngLat);
+      } else {
+        destinationMarkerRef.current = new maplibregl.Marker({ color: "#ef4444" }).setLngLat(lngLat).addTo(map);
+      }
+    } else {
+      destinationMarkerRef.current?.remove();
+      destinationMarkerRef.current = null;
+    }
+  }, [destination]);
 
   useEffect(() => {
     const map = mapRef.current;
