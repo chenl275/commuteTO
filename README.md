@@ -30,7 +30,8 @@ A multi-modal transit routing engine for Toronto's TTC network that accounts for
 - **Live GTFS-RT Telemetry:** Ingests live Metrolinx/TTC binary Protocol Buffer feeds (`TripUpdates` and `VehiclePositions`) to capture real-world headway and transponder offsets.
 - **Dynamic Disruption Modeling:** Surfaces live detour advisories, scraper-backed track slow zones, and per-leg delay penalties on active transit legs.
 - **Subway Train Interpolation:** Maps underground subway movements by projecting real-time signal block progress onto high-resolution track geometry.
-<img width="2940" height="1600" alt="Screenshot 2026-09-21 at 10 48 39 AM" src="https://github.com/user-attachments/assets/311c04f5-019f-420e-bc20-847ae310819c" />
+<img width="5120" height="2350" alt="Screenshot 2026-09-26 at 10 10 36 PM" src="https://github.com/user-attachments/assets/6e15c454-76bf-4331-b0ea-b8cbbcd8d9c7" />
+
 
 ---
 
