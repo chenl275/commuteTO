@@ -205,16 +205,6 @@ interface LayerVisibility {
   nightBuses: boolean;
 }
 
-// TTC's Blue Night network uses the 300-399 route-number range (matching
-// backend/scripts/ingest_surface_gtfs.py's own NIGHT_BUS_RANGE) — an
-// ordinary daytime bus leg (e.g. "29") shares CommuteStep's generic "bus"
-// mode with a night one (e.g. "320"), so the mode alone can't tell them
-// apart (see the commuteResult layer-auto-sync below).
-function isNightBusRouteNumber(routeNumber: string): boolean {
-  const numeric = Number(routeNumber);
-  return !Number.isNaN(numeric) && numeric >= 300 && numeric < 400;
-}
-
 // Subways, streetcars, and day buses shown by default; night buses stay
 // opt-in — they're only relevant during the overnight window most visitors
 // aren't browsing in. Day buses used to default off too (the full ~150-route
@@ -1128,37 +1118,6 @@ export default function TTCMap({
 
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>(DEFAULT_LAYER_VISIBILITY);
   const layerVisibilityRef = useRef(layerVisibility);
-
-  // A night-network result (e.g. 320 Yonge overnight) is only meaningful in
-  // the context of the Blue Night background layer — auto-check that toggle
-  // so the checkbox and what's on the map never disagree; a plain daytime
-  // bus result gets the same treatment for the Day Buses toggle. This
-  // adjusts state during render (React's recommended pattern for "derive
-  // state from a prop change") rather than in an effect, since it only
-  // needs to run once per actual commuteResult change, not resync an
-  // external system every render.
-  const [lastSyncedCommuteResult, setLastSyncedCommuteResult] = useState(commuteResult);
-  if (commuteResult !== lastSyncedCommuteResult) {
-    setLastSyncedCommuteResult(commuteResult);
-    // CommuteStep's mode is just "bus" for both networks (see
-    // types/traffic.ts) — TTC's own 300-399 Blue Night route-number range
-    // (matching backend/scripts/ingest_surface_gtfs.py's NIGHT_BUS_RANGE)
-    // is what actually tells a night leg (e.g. "320") apart from an
-    // ordinary daytime one (e.g. "29"). Previously this checked mode alone,
-    // which meant an everyday daytime-bus commute incorrectly force-enabled
-    // the Blue Night overlay instead of (or as well as) Day Buses.
-    const usesNightBus =
-      commuteResult?.steps.some((step) => step.mode === "bus" && isNightBusRouteNumber(step.routeNumber)) ?? false;
-    const usesDayBus =
-      commuteResult?.steps.some((step) => step.mode === "bus" && !isNightBusRouteNumber(step.routeNumber)) ?? false;
-    if ((usesNightBus && !layerVisibility.nightBuses) || (usesDayBus && !layerVisibility.dayBuses)) {
-      setLayerVisibility((previous) => ({
-        ...previous,
-        nightBuses: previous.nightBuses || usesNightBus,
-        dayBuses: previous.dayBuses || usesDayBus,
-      }));
-    }
-  }
 
   const slowZonesDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
   const disruptionsDataRef = useRef<GeoJSON.FeatureCollection>(EMPTY_FEATURE_COLLECTION);
