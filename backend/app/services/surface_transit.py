@@ -2,8 +2,14 @@
 
 Generated offline by scripts/ingest_surface_gtfs.py from the City of
 Toronto's GTFS feed. Genuinely static (regenerated manually, not on a live
-schedule) so it's loaded once at import time rather than fetched/cached
-like the live scraper services.
+schedule).
+
+The raw streetcars/day-buses/night-buses GeoJSON files are served straight
+from disk via FileResponse (see main.py) instead of being parsed into
+Python dicts, since day_buses.geojson alone is ~8MB and holding all three
+decoded in the heap is a meaningful chunk of a 512MB Render instance.
+Only surface_stops.json needs a shape transform before it can go out as
+GeoJSON, so that one is parsed on request rather than cached at import.
 """
 
 from __future__ import annotations
@@ -11,21 +17,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+STREETCARS_GEOJSON_PATH = DATA_DIR / "streetcars.geojson"
+DAY_BUSES_GEOJSON_PATH = DATA_DIR / "day_buses.geojson"
+NIGHT_BUSES_GEOJSON_PATH = DATA_DIR / "night_buses.geojson"
 
 _EMPTY_FEATURE_COLLECTION = {"type": "FeatureCollection", "features": []}
 
 
-def _load_geojson(filename: str) -> dict:
-    try:
-        return json.loads((_DATA_DIR / filename).read_text())
-    except (OSError, json.JSONDecodeError):
-        return dict(_EMPTY_FEATURE_COLLECTION)
-
-
 def _load_stops_as_geojson(filename: str) -> dict:
     try:
-        stops = json.loads((_DATA_DIR / filename).read_text())
+        stops = json.loads((DATA_DIR / filename).read_text())
     except (OSError, json.JSONDecodeError):
         return dict(_EMPTY_FEATURE_COLLECTION)
     if not isinstance(stops, list):
@@ -51,23 +54,5 @@ def _load_stops_as_geojson(filename: str) -> dict:
     }
 
 
-_STREETCARS_GEOJSON = _load_geojson("streetcars.geojson")
-_DAY_BUSES_GEOJSON = _load_geojson("day_buses.geojson")
-_NIGHT_BUSES_GEOJSON = _load_geojson("night_buses.geojson")
-_SURFACE_STOPS_GEOJSON = _load_stops_as_geojson("surface_stops.json")
-
-
-def get_streetcars_geojson() -> dict:
-    return _STREETCARS_GEOJSON
-
-
-def get_day_buses_geojson() -> dict:
-    return _DAY_BUSES_GEOJSON
-
-
-def get_night_buses_geojson() -> dict:
-    return _NIGHT_BUSES_GEOJSON
-
-
 def get_surface_stops_geojson() -> dict:
-    return _SURFACE_STOPS_GEOJSON
+    return _load_stops_as_geojson("surface_stops.json")

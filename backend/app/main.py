@@ -3,6 +3,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .schemas import (
     AlertsResponse,
@@ -15,9 +16,9 @@ from .services.alerts_service import get_alerts
 from .services.detour_service import get_active_surface_detours
 from .services.slow_zones_scraper import get_slow_zones
 from .services.surface_transit import (
-    get_day_buses_geojson,
-    get_night_buses_geojson,
-    get_streetcars_geojson,
+    DAY_BUSES_GEOJSON_PATH,
+    NIGHT_BUSES_GEOJSON_PATH,
+    STREETCARS_GEOJSON_PATH,
     get_surface_stops_geojson,
 )
 from .traffic_service import TransitCommuteError, get_transit_commute_estimate
@@ -56,18 +57,18 @@ async def alerts() -> AlertsResponse:
 
 
 @app.get("/transit/surface/streetcars")
-def surface_streetcars() -> dict:
-    return get_streetcars_geojson()
+def surface_streetcars() -> FileResponse:
+    return FileResponse(STREETCARS_GEOJSON_PATH, media_type="application/geo+json")
 
 
 @app.get("/transit/surface/day-buses")
-def surface_day_buses() -> dict:
-    return get_day_buses_geojson()
+def surface_day_buses() -> FileResponse:
+    return FileResponse(DAY_BUSES_GEOJSON_PATH, media_type="application/geo+json")
 
 
 @app.get("/transit/surface/night-buses")
-def surface_night_buses() -> dict:
-    return get_night_buses_geojson()
+def surface_night_buses() -> FileResponse:
+    return FileResponse(NIGHT_BUSES_GEOJSON_PATH, media_type="application/geo+json")
 
 
 @app.get("/transit/surface/stops")

@@ -301,22 +301,19 @@ def _walk_minutes(distance_meters: float) -> float:
 def _get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
     conn.execute("PRAGMA query_only = TRUE")
-    # Read-performance tuning — safe on a read-only connection since none of
-    # these affect on-disk durability: a larger page cache and memory-mapped
-    # I/O cut down on repeated disk reads for the hot stop_times/shapes
-    # tables across a single Dijkstra search's many small queries, and
-    # routing temp b-trees/sorts through memory avoids a temp-file round
-    # trip for the ORDER BY queries this module runs. synchronous/
-    # journal_mode only actually govern write-durability trade-offs —
+    # synchronous/journal_mode only govern write-durability trade-offs —
     # harmless to set here (this connection is query_only and never writes)
     # but with no real upside either, since there's no write path for them
     # to speed up; included for explicitness/parity with what a write
     # connection to this same file would want.
     conn.execute("PRAGMA synchronous = OFF")
     conn.execute("PRAGMA journal_mode = OFF")
-    conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA cache_size = -64000")  # 64MB page cache
-    conn.execute("PRAGMA mmap_size = 300000000")  # ~286MB memory-mapped I/O
+    # Memory-capping: Render's free tier is 512MB total, so page cache and
+    # mmap I/O are kept small/off rather than tuned for max query speed, and
+    # temp b-trees/sorts spill to disk instead of growing the heap.
+    conn.execute("PRAGMA cache_size = -10000")  # cap page cache to ~10MB
+    conn.execute("PRAGMA temp_store = FILE")  # spill temp tables to disk, not RAM
+    conn.execute("PRAGMA mmap_size = 0")  # disable memory-mapped I/O
     return conn
 
 

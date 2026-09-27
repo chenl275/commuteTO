@@ -23,6 +23,21 @@ uvicorn app.main:app --reload --port 8000
 The frontend (`NEXT_PUBLIC_BACKEND_URL`, default `http://localhost:8000`)
 expects this to be running on port 8000 while developing locally.
 
+## Deploy (Render)
+
+Render's free tier caps the instance at 512MB, and each Uvicorn worker
+loads its own copy of the process (GTFS routing DB connections, etc.), so
+the service must run with a single worker or it can OOM-restart. Set the
+Render service's Start Command to:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+```
+
+(`--workers 1` is Uvicorn's default when the flag is omitted, but pin it
+explicitly here so a future edit to the Start Command doesn't silently
+reintroduce multi-worker memory multiplication.)
+
 ## API
 
 ### `GET /transit/slow-zones`

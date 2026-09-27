@@ -79,6 +79,11 @@ NEAREST_MATCH_MAX_SECONDS = 45 * 60
 def _get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
     conn.execute("PRAGMA query_only = TRUE")
+    # Memory-capping: keep this connection's footprint small on Render's
+    # 512MB free tier.
+    conn.execute("PRAGMA cache_size = -10000")  # cap page cache to ~10MB
+    conn.execute("PRAGMA temp_store = FILE")  # spill temp tables to disk, not RAM
+    conn.execute("PRAGMA mmap_size = 0")  # disable memory-mapped I/O
     return conn
 
 

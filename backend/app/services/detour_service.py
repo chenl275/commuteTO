@@ -90,6 +90,9 @@ def _resolve_stop_details(stop_ids: list[str]) -> list[dict]:
     if not stop_ids or not _ROUTING_DB_PATH.exists():
         return []
     conn = sqlite3.connect(f"file:{_ROUTING_DB_PATH}?mode=ro", uri=True)
+    conn.execute("PRAGMA cache_size = -10000")  # cap page cache to ~10MB
+    conn.execute("PRAGMA temp_store = FILE")  # spill temp tables to disk, not RAM
+    conn.execute("PRAGMA mmap_size = 0")  # disable memory-mapped I/O
     try:
         placeholders = ",".join("?" * len(stop_ids))
         rows = conn.execute(
